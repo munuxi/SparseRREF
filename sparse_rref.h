@@ -105,14 +105,20 @@ namespace SparseRREF {
 		return std::popcount(x);
 	}
 
-	int minimal_signed_bits(int64_t x) {
-		uint64_t ux = x < 0 ? ~uint64_t(x) : uint64_t(x);
-		return 65 - clz(ux | 1);
+	template <typename T>
+	inline uint8_t minimal_signed_bits(T x) noexcept {
+		if (x >= INT8_MIN && x <= INT8_MAX) return 0;
+		if (x >= INT16_MIN && x <= INT16_MAX) return 1;
+		if (x >= INT32_MIN && x <= INT32_MAX) return 2;
+		return 3; // for int64_t
 	}
 
-	int minimal_unsigned_bits(uint64_t x) {
-		if (x == 0) return 1;
-		return 64 - clz(x);
+	template <typename T>
+	inline uint8_t minimal_unsigned_bits(T x) noexcept {
+		if (x <= UINT8_MAX) return 0;
+		if (x <= UINT16_MAX) return 1;
+		if (x <= UINT32_MAX) return 2;
+		return 3; // for uint64_t
 	}
 
 	// string
