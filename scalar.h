@@ -110,6 +110,7 @@ namespace Flint {
 		int_t& operator=(const int_t& other) { if (this != &other) fmpz_set(&_data, &other._data); return *this; }
 		int_t& operator=(int_t&& other) noexcept {
 			if (this != &other) {
+				clear();
 				_data = other._data;
 				other.init(); // reset the other data to avoid double free
 			}
@@ -260,6 +261,7 @@ namespace Flint {
 		rat_t& operator=(const rat_t& other) { if (this != &other) fmpq_set(&_data, &other._data); return *this; }
 		rat_t& operator=(rat_t&& other) noexcept {
 			if (this != &other) {
+				clear();
 				_data = other._data;
 				other.init(); // reset the other data to avoid double free
 			}

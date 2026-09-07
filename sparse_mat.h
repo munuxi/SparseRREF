@@ -1413,13 +1413,13 @@ namespace SparseRREF {
 				pool.wait();
 			}
 			else {
-				std::vector<int> flags(leftrows.size(), 0);
+				std::vector<std::atomic<int>> flags(leftrows.size());
 				pool.detach_blocks<size_t>(0, leftrows.size(), [&](const size_t s, const size_t e) {
 					auto id = thread_id();
 					schur_helper<T, index_t> helper(g_helper, id);
 					for (size_t i = s; i < e; i++) {
 						schur_complete_func(mat, leftrows[i], n_pivots, F, helper);
-						flags[i] = 1;
+						flags[i].store(1, std::memory_order_release);
 						if (opt->abort)
 							break;
 					}
@@ -1452,7 +1452,7 @@ namespace SparseRREF {
 					if (localcount * 2 < leftrows.size() && pool.get_tasks_total() == 0) {
 						std::vector<size_t> newleftrows;
 						for (size_t i = 0; i < leftrows.size(); i++) {
-							if (flags[i])
+							if (flags[i].load(std::memory_order_acquire))
 								newleftrows.push_back(leftrows[i]);
 						}
 
@@ -1477,12 +1477,12 @@ namespace SparseRREF {
 					}
 
 					for (size_t i = 0; i < leftrows.size() && localcount < leftrows.size(); i++) {
-						if (flags[i]) {
+						if (flags[i].load(std::memory_order_acquire)) {
 							auto row = leftrows[i];
 							for (size_t j = 0; j < mat[row].nnz(); j++) {
 								tranmat_vec[0][mat[row](j)].push_back(row, true);
 							}
-							flags[i] = 0;
+							flags[i].store(0, std::memory_order_relaxed);
 							localcount++;
 
 							if (localcount * 2 < leftrows.size() && pool.get_tasks_total() == 0)
@@ -1752,13 +1752,13 @@ namespace SparseRREF {
 				pool.wait();
 			}
 			else {
-				std::vector<int> flags(leftrows.size(), 0);
+				std::vector<std::atomic<int>> flags(leftrows.size());
 				pool.detach_blocks<size_t>(0, leftrows.size(), [&](const size_t s, const size_t e) {
 					auto id = SparseRREF::thread_id();
 					schur_helper<T, index_t> helper(g_helper, id);
 					for (size_t i = s; i < e; i++) {
 						schur_complete_func(mat, leftrows[i], n_pivots, F, helper);
-						flags[i] = 1;
+						flags[i].store(1, std::memory_order_release);
 						if (opt->abort)
 							break;
 					}
@@ -1791,7 +1791,7 @@ namespace SparseRREF {
 					if (localcount * 2 < leftrows.size() && pool.get_tasks_total() == 0) {
 						std::vector<index_t> newleftrows;
 						for (size_t i = 0; i < leftrows.size(); i++) {
-							if (flags[i])
+							if (flags[i].load(std::memory_order_acquire))
 								newleftrows.push_back(leftrows[i]);
 						}
 
@@ -1808,12 +1808,12 @@ namespace SparseRREF {
 					}
 
 					for (size_t i = 0; i < leftrows.size() && localcount < leftrows.size(); i++) {
-						if (flags[i]) {
+						if (flags[i].load(std::memory_order_acquire)) {
 							auto row = leftrows[i];
 							for (size_t j = 0; j < mat[row].nnz(); j++) {
 								tranmat_vec[0][mat[row](j)].push_back(row, true);
 							}
-							flags[i] = 0;
+							flags[i].store(0, std::memory_order_relaxed);
 							localcount++;
 
 							if (localcount * 2 < leftrows.size() && pool.get_tasks_total() == 0)
