@@ -16,6 +16,7 @@
 #include <chrono>
 #include <climits>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <execution>
@@ -43,6 +44,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include <io.h>
 #include <windows.h>
 #else
 #include <sys/mman.h>
@@ -57,10 +59,10 @@
 
 namespace SparseRREF {
 	// version
-	static const char version[] = "v0.4.0";
+	static const char version[] = "v0.4.1";
 	static const int version_major = 0;
 	static const int version_minor = 4;
-	static const int version_patch = 0;
+	static const int version_patch = 1;
 
 	enum SPARSE_FILE_TYPE {
 		SPARSE_FILE_TYPE_PLAIN,
@@ -160,10 +162,11 @@ namespace SparseRREF {
 	// method 0: right and left search
 	// method 1: only right search
 	// method 2: hibrid
-	// method 3: standard RREF (Preview)
 	// TODO: more methods...
 	struct rref_option {
 		bool verbose = false;
+		std::ostream* progress_out = &std::cout; // nullptr disables progress output
+		bool progress_overwrite = true; // rewrite the progress line in place on a terminal
 		bool shrink_memory = false;
 		std::atomic<bool> abort = false;
 		bool is_back_sub = true;
@@ -174,6 +177,126 @@ namespace SparseRREF {
 		thread_pool pool = thread_pool(1); // default: thread pool with 1 thread
 	};
 	using rref_option_t = rref_option[1];
+
+	// progress output
+	//
+	// A progress line is formatted into a stack buffer and written with a single
+	// call, so lines are never interleaved and the caller's formatting state
+	// (precision, fill, ...) is never inherited nor modified.
+	inline bool is_tty_fd(int fd) {
+#if defined(_WIN32)
+		return _isatty(fd) != 0;
+#else
+		return ::isatty(fd) != 0;
+#endif
+	}
+
+	// only the standard streams can be tested, anything else is not a terminal
+	inline bool is_tty_stream(const std::ostream* os) {
+		if (os == &std::cout)
+			return is_tty_fd(1);
+		if (os == &std::cerr)
+			return is_tty_fd(2);
+		return false;
+	}
+
+	inline int num_digits(size_t n) {
+		int digits = 1;
+		while (n >= 10) {
+			n /= 10;
+			digits++;
+		}
+		return digits;
+	}
+
+	inline double density_percent(size_t nnz, size_t nrow, size_t ncol) {
+		size_t total = nrow * ncol;
+		return total == 0 ? 0.0 : 100.0 * (double)nnz / (double)total;
+	}
+
+	inline double rate_per_second(double count, double seconds) {
+		return seconds > 0 ? count / seconds : 0.0;
+	}
+
+	// Timeout used by a thread that waits for the pool while it keeps a progress
+	// line up to date. The wait itself blocks on a condition variable, so this
+	// only bounds how often the progress line is refreshed.
+	inline constexpr std::chrono::milliseconds progress_poll_interval{ 50 };
+
+	// A single progress line, emitted when the object goes out of scope. It is
+	// overwritten in place ('\r') only on a terminal.
+	struct progress_line {
+		static constexpr size_t buffer_size = 320;
+		std::ostream* os_ = nullptr;
+		bool overwrite_ = false;
+		size_t len_ = 0;
+		char buffer_[buffer_size] = {};
+
+		template <typename... Args>
+		void append(const char* fmt, Args... args) {
+			if (len_ + 1 >= buffer_size)
+				return;
+			int written = std::snprintf(buffer_ + len_, buffer_size - len_, fmt, args...);
+			if (written > 0)
+				len_ += std::min((size_t)written, buffer_size - len_ - 1);
+		}
+
+		progress_line(const progress_line&) = delete;
+		progress_line(progress_line&&) = delete;
+
+		progress_line(std::ostream* os, bool allow_overwrite, const char* label) {
+			if (os == nullptr)
+				return;
+			os_ = os;
+			overwrite_ = allow_overwrite && is_tty_stream(os);
+			append("-- %s: ", label);
+		}
+
+		template <typename... Args>
+		progress_line& add(const char* fmt, Args... args) {
+			if (os_ != nullptr)
+				append(fmt, args...);
+			return *this;
+		}
+
+		~progress_line() {
+			if (os_ == nullptr)
+				return;
+			if (len_ + 2 > buffer_size)
+				len_ = buffer_size - 2;
+			buffer_[len_++] = overwrite_ ? '\r' : '\n';
+			os_->write(buffer_, (std::streamsize)len_);
+			os_->flush();
+		}
+	};
+
+	// begin a progress line on the progress stream of `opt`; callers keep their
+	// own verbosity check
+	inline progress_line progress(const rref_option_t opt, const char* label) {
+		return progress_line(opt->progress_out, opt->progress_overwrite, label);
+	}
+
+	// a one-off progress message, terminated by a newline
+	template <typename... Args>
+	void progress_message(const rref_option_t opt, const char* fmt, Args... args) {
+		if (opt->progress_out == nullptr)
+			return;
+		char buffer[512];
+		int written = std::snprintf(buffer, sizeof(buffer), fmt, args...);
+		if (written <= 0)
+			return;
+		size_t len = std::min((size_t)written, sizeof(buffer) - 1);
+		opt->progress_out->write(buffer, (std::streamsize)len);
+		opt->progress_out->flush();
+	}
+
+	// terminate the last in-place progress line; a no-op when progress lines are
+	// already newline-terminated
+	inline void progress_end(const rref_option_t opt) {
+		if (opt->progress_out != nullptr && opt->progress_overwrite
+			&& is_tty_stream(opt->progress_out))
+			opt->progress_out->put('\n');
+	}
 
 	inline size_t ctz(uint64_t x) { return std::countr_zero(x); }
 	inline size_t clz(uint64_t x) { return std::countl_zero(x); }

@@ -138,8 +138,8 @@ namespace SparseRREF {
 		size_t ndir = mat.ncol();
 
 		size_t oldnnz = mat.nnz();
-		int bitlen_nnz = (int)std::floor(std::log(oldnnz) / std::log(10)) + 2;
-		int bitlen_ndir = (int)std::floor(std::log(ndir) / std::log(10)) + 1;
+		int bitlen_nnz = num_digits(oldnnz) + 1;
+		int bitlen_ndir = num_digits(ndir);
 
 		// if the number of newly eliminated rows is less than 
 		// 0.1% of the total number of eliminated rows, we stop
@@ -148,13 +148,12 @@ namespace SparseRREF {
 			count += localcounter;
 			if (verbose) {
 				oldnnz = mat.nnz();
-				std::cout << "-- " << "Col" << ": " << std::setw(bitlen_ndir)
-					<< count << "/" << ndir
-					<< "  rank: " << std::setw(bitlen_ndir) << count
-					<< "  nnz: " << std::setw(bitlen_nnz) << oldnnz
-					<< "  density: " << std::setprecision(6) << std::setw(8)
-					<< 100 * (double)oldnnz / (mat.nrow() * mat.ncol()) << "%"
-					<< "    \r" << std::flush;
+				progress(opt, "Col")
+					.add("%*zu/%zu", bitlen_ndir, count, ndir)
+					.add("  rank: %*zu", bitlen_ndir, count)
+					.add("  nnz: %*zu", bitlen_nnz, oldnnz)
+					.add("  density: %8.6g%%", density_percent(oldnnz, mat.nrow(), mat.ncol()))
+					.add("    ");
 			}
 			depth++;
 			if (opt->abort)
@@ -317,7 +316,7 @@ namespace SparseRREF {
 		return pivots;
 	}
 
-	template <bool standard_rref, typename T, typename index_t>
+	template <typename T, typename index_t>
 	std::vector<pivot_t<index_t>> pivots_search_left(const sparse_mat<T, index_t>& mat,
 		const std::vector<sparse_mat<bool, index_t>>& tranmat_vec,
 		const std::vector<size_t>& leftrows, const std::vector<index_t>& leftcols,
@@ -364,12 +363,8 @@ namespace SparseRREF {
 				if (!flag)
 					break;
 			}
-			if constexpr (standard_rref) {
-				if (!flag) break;
-			}
-			else {
-				if (!flag) continue;
-			}
+			if (!flag)
+				continue;
 
 			if (mnnz != SIZE_MAX) {
 				pivots.emplace_back(row, col);
@@ -394,7 +389,9 @@ namespace SparseRREF {
 		const std::vector<pivot_t<index_t>>& pivots,
 		const field_t& F, rref_option_t opt, int ordering) {
 		bool verbose = opt->verbose;
-		auto printstep = opt->print_step;
+		// a non-positive print_step would be an undefined modulo below; take it as
+		// "print every row", which is what the other progress sites do
+		size_t printstep = opt->print_step > 0 ? (size_t)opt->print_step : 1;
 		auto& pool = opt->pool;
 
 		bit_array rowlist(mat.nrow);
@@ -437,18 +434,18 @@ namespace SparseRREF {
 				count++;
 				auto end = SparseRREF::clocknow();
 				auto now_nnz = mat.nnz();
-				std::cout << "\r-- Row: " << (i + 1) << "/" << pivots.size()
-					<< "  " << "row to eliminate: " << thecol.size() - 1
-					<< "  " << "nnz: " << now_nnz << "  " << "density: "
-					<< (double)100 * now_nnz / (mat.nrow * mat.ncol)
-					<< "%  " << "speed: " << count / SparseRREF::usedtime(start, end)
-					<< " row/s" << std::flush;
+				progress(opt, "Row")
+					.add("%zu/%zu", i + 1, pivots.size())
+					.add("  row to eliminate: %zu", thecol.size() - 1)
+					.add("  nnz: %zu", now_nnz)
+					.add("  density: %g%%", density_percent(now_nnz, mat.nrow, mat.ncol))
+					.add("  speed: %g row/s", rate_per_second((double)count, SparseRREF::usedtime(start, end)));
 				start = SparseRREF::clocknow();
 				count = 0;
 			}
 		}
 		if (opt->verbose)
-			std::cout << std::endl;
+			progress_end(opt);
 	}
 	
 	// in this version, we compute the transpose inside
@@ -859,7 +856,7 @@ namespace SparseRREF {
 		if (opt->abort)
 			return;
 
-		auto printstep = opt->print_step;
+		const size_t printstep = opt->print_step > 0 ? (size_t)opt->print_step : 1;
 		bool verbose = opt->verbose;
 		auto& pool = opt->pool;
 		opt->verbose = false;
@@ -884,8 +881,8 @@ namespace SparseRREF {
 
 		// for printing
 		size_t now_nnz = mat.nnz();
-		int bitlen_nnz = (int)std::floor(std::log(now_nnz) / std::log(10)) + 2;
-		int bitlen_nrow = (int)std::floor(std::log(rank) / std::log(10)) + 1;
+		int bitlen_nnz = num_digits(now_nnz) + 1;
+		int bitlen_nrow = num_digits(rank);
 
 		double density = (double)now_nnz / (mat.nrow * mat.ncol);
 		auto schur_complete_func = &schur_complete_buffer<T, index_t, 10>;
@@ -906,19 +903,21 @@ namespace SparseRREF {
 		bool print_once = true;
 
 		if (verbose) {
-			double status = 1.0 * sub_pivots.size() * cc / leftrows.size();
-			double old_status = status;
-			while (cc < leftrows.size() && (print_once || status - old_status > printstep)) {
+			double old_status = 1.0 * sub_pivots.size() * cc.load(std::memory_order_relaxed) / leftrows.size();
+			while (cc.load(std::memory_order_relaxed) < leftrows.size()) {
+				double status = 1.0 * sub_pivots.size() * cc.load(std::memory_order_relaxed) / leftrows.size();
+				if (!print_once && status - old_status <= (double)printstep) {
+					if (pool.wait_for(progress_poll_interval))
+						break; // pool idle, no further progress can be reported
+					continue;
+				}
 				now_nnz = mat.nnz();
-				status = 1.0 * sub_pivots.size() * cc / leftrows.size();
-				std::cout << "-- Row: " << std::setw(bitlen_nrow)
-					<< process + (size_t)status << "/" << rank
-					<< "  nnz: " << std::setw(bitlen_nnz) << now_nnz
-					<< "  density: " << std::setprecision(6) << std::setw(8)
-					<< 100 * (double)now_nnz / (mat.nrow * mat.ncol) << "%"
-					<< "  speed: " << std::setprecision(6) << std::setw(6)
-					<< (status - old_status) / SparseRREF::usedtime(clock_begin, SparseRREF::clocknow())
-					<< " row/s    \r" << std::flush;
+				progress(opt, "Row")
+					.add("%*zu/%zu", bitlen_nrow, process + (size_t)status, rank)
+					.add("  nnz: %*zu", bitlen_nnz, now_nnz)
+					.add("  density: %8.6g%%", density_percent(now_nnz, mat.nrow, mat.ncol))
+					.add("  speed: %6.6g row/s", rate_per_second(status - old_status, SparseRREF::usedtime(clock_begin, SparseRREF::clocknow())))
+					.add("    ");
 				clock_begin = SparseRREF::clocknow();
 				old_status = status;
 				print_once = false;
@@ -971,7 +970,7 @@ namespace SparseRREF {
 		triangular_solver_2_rec(mat, tranmat, pivots, F, opt, g_helper, n_split, rank, process);
 
 		if (opt->verbose)
-			std::cout << std::endl;
+			progress_end(opt);
 	}
 
 	template <typename T, typename index_t>
@@ -1116,8 +1115,8 @@ namespace SparseRREF {
 		}
 		leftrows.resize(leftrows.size() - pivots[0].size());
 		
-		int bitlen_nrow = (int)std::floor(std::log(total_rank) / std::log(10)) + 1;
-		int bitlen_nnz = (int)std::floor(std::log(mat.nnz()) / std::log(10)) + 2;
+		int bitlen_nrow = num_digits(total_rank);
+		int bitlen_nnz = num_digits(mat.nnz()) + 1;
 
 		std::vector<pivot_t<index_t>> used_pivots;
 		for (size_t i = 1; i < pivots.size(); i++) {
@@ -1172,28 +1171,33 @@ namespace SparseRREF {
 
 			if (opt->verbose) {
 				auto cn = clocknow();
-				while (cc < leftrows.size()) {
+				const size_t printstep = opt->print_step > 0 ? (size_t)opt->print_step : 1;
+				while (cc.load(std::memory_order_relaxed) < leftrows.size()) {
 					if (opt->abort) {
 						pool.purge();
 						return;
 					}
-					if (cc - old_cc > opt->print_step) {
-						std::cout << "\r-- Row: " << std::setw(bitlen_nrow)
-							<< (int)std::floor(rank + (cc * 1.0 / leftrows.size()) * used_pivots.size())
-							<< "/" << total_rank << "  nnz: " << std::setw(bitlen_nnz) << mat.nnz()
-							<< "  alloc: " << mat.alloc()
-							<< "  speed: " << (((cc - old_cc) * 1.0 / leftrows.size()) * used_pivots.size() / usedtime(cn, clocknow()))
-							<< " row/s          " << std::flush;
-						old_cc = cc;
+					const size_t cur_cc = cc.load(std::memory_order_relaxed);
+					if (cur_cc - old_cc > printstep) {
+						auto now_nnz = mat.nnz();
+						progress(opt, "Row")
+							.add("%*zu/%zu", bitlen_nrow, (size_t)std::floor(rank + (cur_cc * 1.0 / leftrows.size()) * used_pivots.size()), total_rank)
+							.add("  nnz: %*zu", bitlen_nnz, now_nnz)
+							.add("  alloc: %zu", mat.alloc())
+							.add("  speed: %g row/s", rate_per_second((((cur_cc - old_cc) * 1.0 / leftrows.size()) * used_pivots.size()), usedtime(cn, clocknow())))
+							.add("          ");
+						old_cc = cur_cc;
 						cn = clocknow();
 					}
+					// block until the pool makes progress instead of spinning
+					pool.wait_for(progress_poll_interval);
 				}
 			}
 			pool.wait();
 			rank += used_pivots.size();
 		}
 		if (opt->verbose) {
-			std::cout << std::endl;
+			progress_end(opt);
 		}
 
 		if (opt->is_back_sub)
@@ -1297,8 +1301,8 @@ namespace SparseRREF {
 
 		// for printing
 		double oldpr = 0;
-		int bitlen_nnz = (int)std::floor(std::log(now_nnz) / std::log(10)) + 2;
-		int bitlen_ncol = (int)std::floor(std::log(mat.ncol) / std::log(10)) + 1;
+		int bitlen_nnz = num_digits(now_nnz) + 1;
+		int bitlen_ncol = num_digits(mat.ncol);
 
 		bit_array tmp_set(mat.ncol);
 
@@ -1308,11 +1312,10 @@ namespace SparseRREF {
 
 			std::vector<pivot_t<index_t>> ps;
 
+			// case 1 is to use the right search method
 			switch (method) {
-			case 0: case 2: ps = pivots_search(mat, tranmat_vec, leftrows, leftcols, opt->col_weight); break;
-			case 1: ps = pivots_search(mat, tranmat_vec, leftrows, leftcols, opt->col_weight); break;
-			case 3: ps = pivots_search_left<true>(mat, tranmat_vec, leftrows, leftcols, opt->col_weight); break;
-			default: ps = pivots_search_right(mat, leftrows, leftcols, opt->col_weight); break;
+			case 1: ps = pivots_search_right(mat, leftrows, leftcols, opt->col_weight); break;
+			default: ps = pivots_search(mat, tranmat_vec, leftrows, leftcols, opt->col_weight); break;
 			}
 
 			if (ps.size() == 0)
@@ -1356,16 +1359,14 @@ namespace SparseRREF {
 					auto end = clocknow();
 					now_nnz = mat.nnz();
 					auto now_alloc = mat.alloc();
-					std::cout << "-- Col: " << std::setw(bitlen_ncol)
-						<< (int)pr << "/" << mat.ncol
-						<< "  rank: " << std::setw(bitlen_ncol) << kk + ps.size()
-						<< "  nnz: " << std::setw(bitlen_nnz) << now_nnz
-						<< "  alloc: " << std::setw(bitlen_nnz) << now_alloc
-						<< "  density: " << std::setprecision(6) << std::setw(8)
-						<< 100 * (double)now_nnz / (mat.nrow * mat.ncol) << "%"
-						<< "  speed: " << std::setprecision(6) << std::setw(8) <<
-						((pr - oldpr) / usedtime(start, end))
-						<< " col/s    \r" << std::flush;
+					progress(opt, "Col")
+						.add("%*zu/%zu", bitlen_ncol, (size_t)pr, mat.ncol)
+						.add("  rank: %*zu", bitlen_ncol, kk + ps.size())
+						.add("  nnz: %*zu", bitlen_nnz, now_nnz)
+						.add("  alloc: %*zu", bitlen_nnz, now_alloc)
+						.add("  density: %8.6g%%", density_percent(now_nnz, mat.nrow, mat.ncol))
+						.add("  speed: %8.6g col/s", rate_per_second(pr - oldpr, usedtime(start, end)))
+						.add("    ");
 					oldpr = pr;
 					start = end;
 					print_once = false;
@@ -1401,14 +1402,15 @@ namespace SparseRREF {
 				bool print_once = true; // print at least once
 
 				localcount = 0;
-				while (done_count < leftrows.size()) {
+				while (done_count.load(std::memory_order_relaxed) < leftrows.size()) {
 					if (opt->abort) {
 						pool.purge();
 						return pivots;
 					}
 
-					print_info(rank, done_count, print_once, oldpr);
-					std::this_thread::sleep_for(std::chrono::microseconds(10));
+					print_info(rank, done_count.load(std::memory_order_relaxed), print_once, oldpr);
+					// block until the pool makes progress instead of polling
+					pool.wait_for(progress_poll_interval);
 				}
 				pool.wait();
 			}
@@ -1467,9 +1469,10 @@ namespace SparseRREF {
 							}, (newleftrows.size() < 20 * nthreads ? 0 : newleftrows.size() / 10));
 
 						if (opt->verbose) {
-							while (localcount < leftrows.size() && !(opt->abort)) {
-								print_info(rank, localcount, print_once, oldpr);
-								std::this_thread::sleep_for(std::chrono::microseconds(100));
+							while (localcount.load(std::memory_order_relaxed) < leftrows.size() && !(opt->abort)) {
+								print_info(rank, localcount.load(std::memory_order_relaxed), print_once, oldpr);
+								// block until the pool makes progress instead of polling
+								pool.wait_for(progress_poll_interval);
 							}
 						}
 
@@ -1513,7 +1516,7 @@ namespace SparseRREF {
 		}
 
 		if (opt->verbose)
-			std::cout << "\n** Rank: " << rank << " nnz: " << mat.nnz() << std::endl;
+			progress_message(opt, "\n** Rank: %zu nnz: %zu\n", (size_t)rank, mat.nnz());
 
 		return pivots;
 	}
@@ -1631,8 +1634,8 @@ namespace SparseRREF {
 
 		// for printing
 		double oldpr = 0;
-		int bitlen_nnz = (int)std::floor(std::log(now_nnz) / std::log(10)) + 2;
-		int bitlen_ncol = (int)std::floor(std::log(mat.ncol) / std::log(10)) + 1;
+		int bitlen_nnz = num_digits(now_nnz) + 1;
+		int bitlen_ncol = num_digits(mat.ncol);
 
 		bit_array tmp_set(mat.ncol);
 
@@ -1695,16 +1698,14 @@ namespace SparseRREF {
 					auto end = SparseRREF::clocknow();
 					now_nnz = mat.nnz();
 					auto now_alloc = mat.alloc();
-					std::cout << "-- Col: " << std::setw(bitlen_ncol)
-						<< (int)pr << "/" << mat.ncol
-						<< "  rank: " << std::setw(bitlen_ncol) << rank
-						<< "  nnz: " << std::setw(bitlen_nnz) << now_nnz
-						<< "  alloc: " << std::setw(bitlen_nnz) << now_alloc
-						<< "  density: " << std::setprecision(6) << std::setw(8)
-						<< 100 * (double)now_nnz / (mat.nrow * mat.ncol) << "%"
-						<< "  speed: " << std::setprecision(6) << std::setw(8) <<
-						((pr - oldpr) / SparseRREF::usedtime(start, end))
-						<< " col/s    \r" << std::flush;
+					progress(opt, "Col")
+						.add("%*zu/%zu", bitlen_ncol, (size_t)pr, mat.ncol)
+						.add("  rank: %*zu", bitlen_ncol, rank)
+						.add("  nnz: %*zu", bitlen_nnz, now_nnz)
+						.add("  alloc: %*zu", bitlen_nnz, now_alloc)
+						.add("  density: %8.6g%%", density_percent(now_nnz, mat.nrow, mat.ncol))
+						.add("  speed: %8.6g col/s", rate_per_second(pr - oldpr, SparseRREF::usedtime(start, end)))
+						.add("    ");
 					oldpr = pr;
 					start = end;
 					print_once = false;
@@ -1747,7 +1748,7 @@ namespace SparseRREF {
 					}
 
 					print_info(kk, done_count, print_once, oldpr);
-					std::this_thread::sleep_for(std::chrono::microseconds(10));
+					pool.wait_for(progress_poll_interval);
 				}
 				pool.wait();
 			}
@@ -1844,7 +1845,7 @@ namespace SparseRREF {
 		}
 
 		if (verbose)
-			std::cout << "\n** Rank: " << rank << " nnz: " << mat.nnz() << std::endl;
+			progress_message(opt, "\n** Rank: %zu nnz: %zu\n", (size_t)rank, mat.nnz());
 
 		return pivots;
 	}
@@ -1853,19 +1854,7 @@ namespace SparseRREF {
 	std::vector<std::vector<pivot_t<index_t>>>
 		sparse_mat_rref(sparse_mat<T, index_t>& mat, const field_t& F, rref_option_t opt) {
 
-		std::vector<std::vector<pivot_t<index_t>>> pivots;
-
-		if (opt->method == 3) {
-			// it is more efficient that eliminate with column permutation with back substitution, 
-			// and then do the standard RREF without column permutation
-			opt->method = 0;
-			pivots = sparse_mat_rref_forward(mat, F, opt);
-			opt->method = 3;
-			pivots = sparse_mat_rref_forward(mat, F, opt);
-		}
-		else {
-			pivots = sparse_mat_rref_forward(mat, F, opt);
-		}
+		auto pivots = sparse_mat_rref_forward(mat, F, opt);
 
 		if (opt->shrink_memory) {
 			opt->pool.detach_loop(0, mat.nrow, [&](auto i) {
@@ -1879,31 +1868,9 @@ namespace SparseRREF {
 
 		if (opt->is_back_sub) {
 			if (opt->verbose)
-				std::cout << "\n>> Reverse solving: " << std::endl;
+				progress_message(opt, "\n>> Reverse solving: \n");
 			// triangular_solver(mat, pivots, F, opt, -1);
 			triangular_solver_2(mat, pivots, F, opt);
-		}
-
-		// for the RREF, we need to reorder the rows
-		if (opt->method == 3) {
-			std::vector<pivot_t<index_t>> flatten_pivots;
-			for (auto& ps : pivots) 
-				flatten_pivots.insert(flatten_pivots.end(), ps.begin(), ps.end());
-
-			std::ranges::sort(flatten_pivots, {}, &pivot_t<index_t>::c);
-
-			// then reorder the rows according to the pivots
-			sparse_mat<T, index_t> nmat(mat.nrow, mat.ncol);
-			index_t count = 0;
-			for (auto& [r, c] : flatten_pivots) {
-				nmat[count] = std::move(mat[r]);
-				r = count;
-				count++;
-			}
-			std::cout << std::endl;
-			mat = std::move(nmat);
-
-			return { flatten_pivots };
 		}
 
 		return pivots;
@@ -2024,7 +1991,7 @@ namespace SparseRREF {
 		auto verbose = opt->verbose;
 
 		if (verbose) {
-			std::cout << std::endl;
+			progress_end(opt);
 		}
 
 		if (opt->abort)
@@ -2048,8 +2015,8 @@ namespace SparseRREF {
 			auto ce = clocknow();
 			
 			if (verbose) {
-				std::cout << ">> Reconstruct failed, now mod ~ " << "2^" << mod.bits();
-				std::cout << ", used time: " << usedtime(cs, ce) << " s" << std::endl;
+				progress_message(opt, ">> Reconstruct failed, now mod ~ 2^%llu, used time: %g s\n",
+					(unsigned long long)mod.bits(), usedtime(cs, ce));
 			}
 			cs = ce;
 			int_t mod1 = mod * prime;
@@ -2088,8 +2055,8 @@ namespace SparseRREF {
 		opt->verbose = verbose;
 
 		if (opt->verbose) {
-			std::cout << "** Reconstruct success! Using mod ~ "
-				<< "2^" << mod.bits() << ".                " << std::endl;
+			progress_message(opt, "** Reconstruct success! Using mod ~ 2^%llu.                \n",
+				(unsigned long long)mod.bits());
 		}
 
 		mat = matq;

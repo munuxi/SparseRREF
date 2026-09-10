@@ -81,6 +81,10 @@ Optional arguments:
   -nb, --no-backward-substitution  no backward substitution
 ```
 
+With `--verbose`, progress lines are rewritten in place when the output is a terminal and
+printed one line per sample (newline-terminated, no carriage returns) when it is redirected
+or piped, so `sprref -V ... > log.txt` yields a clean, parseable log.
+
 The format (matrix market-like format) of input file looks like this:
 ```
 % some comments
