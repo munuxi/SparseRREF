@@ -178,8 +178,14 @@ namespace SparseRREF {
 		const std::function<int64_t(int64_t)>& col_weight = [](int64_t i) { return i; }) {
 
 		std::deque<pivot_t<index_t>> pivots;
-		std::unordered_set<index_t> dict;
-		dict.reserve((size_t)4096);
+		// holds the used rows in the left look and the used columns in the right look
+		bit_array dict(std::max((size_t)mat.nrow, (size_t)mat.ncol) + 1);
+
+		// col_weight is a pure function of the column index and is queried for nearly
+		// every scanned element below, so evaluate it once per column
+		std::vector<int64_t> col_w(mat.ncol);
+		for (index_t i = 0; i < mat.ncol; i++)
+			col_w[i] = col_weight(i);
 
 		std::vector<size_t> tranmat_nnz(mat.ncol, 0);
 		for (auto& tranmat : tranmat_vec) {
@@ -193,16 +199,16 @@ namespace SparseRREF {
 			if (tranmat_nnz[col] == 0)
 				continue;
 			// negative weight means that we do not want to select this column
-			if (col_weight(col) < 0)
+			if (col_w[col] < 0)
 				continue;
 
-			index_t row;
+			index_t row = 0;
 			size_t mnnz = SIZE_MAX;
 			bool flag = true;
 
 			for (auto& tranmat : tranmat_vec) {
 				for (auto r : tranmat[col].index_span()) {
-					flag = (dict.count(r) == 0);
+					flag = !dict.test(r);
 					if (!flag)
 						break;
 					size_t newnnz = mat[r].nnz();
@@ -236,24 +242,29 @@ namespace SparseRREF {
 		for (auto row : leftrows) {
 			index_t col = 0;
 			size_t mnnz = SIZE_MAX;
+			int64_t wcol = 0;
 			bool flag = true;
 
 			for (auto c : mat[row].index_span()) {
+				int64_t wc = col_w[c];
 				// negative weight means that we do not want to select this column
-				if (col_weight(c) < 0)
+				if (wc < 0)
 					continue;
-				flag = (dict.count(c) == 0);
+				flag = !dict.test(c);
 				if (!flag)
 					break;
 				if (tranmat_nnz[c] < mnnz) {
 					mnnz = tranmat_nnz[c];
 					col = c;
+					wcol = wc;
 				}
 				// make the result stable
 				else if (tranmat_nnz[c] == mnnz) {
-					if (col_weight(c) < col_weight(col))
+					if (wc < wcol) {
 						col = c;
-					else if (col_weight(c) == col_weight(col) && c < col)
+						wcol = wc;
+					}
+					else if (wc == wcol && c < col)
 						col = c;
 				}
 			}
@@ -278,30 +289,40 @@ namespace SparseRREF {
 		const std::function<int64_t(int64_t)>& col_weight = [](int64_t i) { return i; }) {
 
 		std::vector<pivot_t<index_t>> pivots;
-		std::unordered_set<index_t> c_dict;
-		c_dict.reserve((size_t)4096);
+		bit_array c_dict((size_t)mat.ncol + 1);
+
+		// col_weight is a pure function of the column index and is queried for nearly
+		// every scanned element below, so evaluate it once per column
+		std::vector<int64_t> col_w(mat.ncol);
+		for (index_t i = 0; i < mat.ncol; i++)
+			col_w[i] = col_weight(i);
 
 		for (auto row : leftrows) {
 			index_t col = 0;
 			size_t mnnz = SIZE_MAX;
+			int64_t wcol = 0;
 			bool flag = true;
 
 			for (auto c : mat[row].index_span()) {
+				int64_t wc = col_w[c];
 				// negative weight means that we do not want to select this column
-				if (col_weight(c) < 0)
+				if (wc < 0)
 					continue;
-				flag = (c_dict.count(c) == 0);
+				flag = !c_dict.test(c);
 				if (!flag)
 					break;
 				if (mnnz > 0) {
 					mnnz = 0;
 					col = c;
+					wcol = wc;
 				}
 				// make the result stable
 				else if (mnnz == 0) {
-					if (col_weight(c) < col_weight(col))
+					if (wc < wcol) {
 						col = c;
-					else if (col_weight(c) == col_weight(col) && c < col)
+						wcol = wc;
+					}
+					else if (wc == wcol && c < col)
 						col = c;
 				}
 			}
@@ -399,8 +420,12 @@ namespace SparseRREF {
 			rowlist.insert(r);
 
 		size_t count = 0;
+		bool printed = false;
 		size_t nthreads = pool.get_thread_count();
 		std::vector<index_t> thecol;
+		// the reference time is kept across the whole loop, so that the reported
+		// speed is the average over the rows handled since the last report
+		auto start = SparseRREF::clocknow();
 		for (size_t i = 0; i < pivots.size(); i++) {
 			size_t index = i;
 			if (ordering < 0)
@@ -413,7 +438,6 @@ namespace SparseRREF {
 					thecol.push_back(r);
 			}
 
-			auto start = SparseRREF::clocknow();
 			if constexpr (std::is_same_v<T, bool>) {
 				pool.detach_loop<index_t>(0, thecol.size(), [&](index_t j) {
 					auto r = thecol[j];
@@ -430,8 +454,8 @@ namespace SparseRREF {
 			}
 			pool.wait();
 
+			count++;
 			if (verbose && (i % printstep == 0 || i == pivots.size() - 1) && thecol.size() > 1) {
-				count++;
 				auto end = SparseRREF::clocknow();
 				auto now_nnz = mat.nnz();
 				progress(opt, "Row")
@@ -440,11 +464,12 @@ namespace SparseRREF {
 					.add("  nnz: %zu", now_nnz)
 					.add("  density: %g%%", density_percent(now_nnz, mat.nrow, mat.ncol))
 					.add("  speed: %g row/s", rate_per_second((double)count, SparseRREF::usedtime(start, end)));
-				start = SparseRREF::clocknow();
+				start = end;
 				count = 0;
+				printed = true;
 			}
 		}
-		if (opt->verbose)
+		if (printed)
 			progress_end(opt);
 	}
 	
@@ -618,6 +643,77 @@ namespace SparseRREF {
 		return A;
 	}
 
+	// A set of column indices supporting O(1) insert/erase/test/enumeration. On top
+	// of the plain bit_array we keep an exact counter (so nnz() is O(1)) and a bitmap
+	// with one bit per *word* of the bit_array that may be non-empty, so that the
+	// final enumeration only visits the words that were touched instead of the whole
+	// ncol/64 range. The word summary is only ever set, never cleared (clearing it
+	// would need a branch on every erase); a stale bit is harmless because the
+	// enumeration skips empty words and clears the summary on the way out.
+	struct alignas(64) nonzero_cols {
+		bit_array bits;
+		bit_array word_bits;
+		size_t nz = 0;
+
+		explicit nonzero_cols(size_t ncol) : bits(ncol), word_bits((ncol >> 6) + 1) {}
+
+		void insert(const size_t val) {
+			auto idx = val >> 6;
+			bits.data[idx] |= mask_table[val & 63];
+			word_bits.data[idx >> 6] |= mask_table[idx & 63];
+			nz++;
+		}
+
+		void erase(const size_t val) {
+			bits.erase(val);
+			nz--;
+		}
+
+		void xor_insert(const size_t val) {
+			if (bits.test(val)) {
+				bits.erase(val);
+				nz--;
+			}
+			else {
+				insert(val);
+			}
+		}
+
+		bool test(const size_t val) const {
+			return bits.test(val);
+		}
+
+		size_t nnz() const {
+			return nz;
+		}
+
+		// write the set indices in increasing order into ptr, then clear the structure
+		template <typename T>
+		void nonzero_and_clear(T* ptr) {
+			size_t pos = 0;
+			auto& wdata = word_bits.data;
+			for (size_t i = 0; i < wdata.size(); i++) {
+				uint64_t wb = wdata[i];
+				if (wb == 0)
+					continue;
+				wdata[i] = 0;
+				while (wb) {
+					auto idx = (i << 6) + ctz(wb);
+					wb &= wb - 1;
+					uint64_t word = bits.data[idx];
+					bits.data[idx] = 0;
+					auto base = idx << 6;
+					while (word) {
+						ptr[pos] = (T)(base + ctz(word));
+						pos++;
+						word &= word - 1;
+					}
+				}
+			}
+			nz = 0;
+		}
+	};
+
 	// a helper class to store the buffer for schur_complete
 	// it is used to avoid frequent memory allocation and deallocation
 	template <typename T, typename index_t>
@@ -625,13 +721,13 @@ namespace SparseRREF {
 		size_t nthreads = 0;
 		size_t ncol = 0;
 		std::vector<T> cache_densed_mat;
-		std::vector<SparseRREF::bit_array> nonzero_cs;
+		std::vector<nonzero_cols> nonzero_cs;
 		std::vector<std::vector<index_t>> add_lists;
 		std::vector<std::vector<index_t>> remove_lists;
 
 		schur_helper_buffer(size_t nthreads_, size_t ncol_) : nthreads(nthreads_), ncol(ncol_) {
 			cache_densed_mat = std::vector<T>(nthreads * ncol);
-			nonzero_cs = std::vector<SparseRREF::bit_array>(nthreads, ncol);
+			nonzero_cs = std::vector<nonzero_cols>(nthreads, nonzero_cols(ncol));
 			add_lists = std::vector<std::vector<index_t>>(nthreads);
 			remove_lists = std::vector<std::vector<index_t>>(nthreads);
 		}
@@ -649,7 +745,7 @@ namespace SparseRREF {
 	template <typename T, typename index_t>
 	struct schur_helper {
 		T* cache_densed_vec = nullptr;
-		SparseRREF::bit_array* nonzero_c = nullptr;
+		nonzero_cols* nonzero_c = nullptr;
 		std::vector<index_t>* add_list = nullptr;
 		std::vector<index_t>* remove_list = nullptr;
 
@@ -846,12 +942,23 @@ namespace SparseRREF {
 		}
 	}
 
+	// Progress bookkeeping of the triangular back substitution, shared by all
+	// recursion levels: every report covers the work completed since the previous
+	// one, so a report issued at a level entry shows the real average speed of
+	// the levels that came before instead of 0.
+	struct triangular_progress_t {
+		std::chrono::system_clock::time_point last_time; // time of the previous report
+		double last_count;                               // completed pivots at the previous report
+		bool reported;                                   // whether any line was already printed
+	};
+
 	template <typename T, typename index_t>
 	void triangular_solver_2_rec(sparse_mat<T, index_t>& mat,
 		const sparse_mat<bool, index_t>& tranmat,
 		const std::vector<pivot_t<index_t>>& pivots,
 		const field_t& F, rref_option_t opt, 
-		schur_helper_buffer<T, index_t>& g_helper, size_t n_split, size_t rank, size_t& process) {
+		schur_helper_buffer<T, index_t>& g_helper, size_t n_split, size_t rank, size_t& process,
+		triangular_progress_t& tprogress) {
 
 		if (opt->abort)
 			return;
@@ -861,8 +968,10 @@ namespace SparseRREF {
 		auto& pool = opt->pool;
 		opt->verbose = false;
 		if (pivots.size() < n_split) {
-			triangular_solver(mat, tranmat, pivots, F, opt, -1);
+			// this level performs the elimination itself, so it is the only one that
+			// can report it; keep the caller's verbosity instead of staying silent
 			opt->verbose = verbose;
+			triangular_solver(mat, tranmat, pivots, F, opt, -1);
 			process += pivots.size();
 			return;
 		}
@@ -889,7 +998,6 @@ namespace SparseRREF {
 		if (100 * density > 0.01)
 			schur_complete_func = &schur_complete<T, index_t>;
 
-		auto clock_begin = SparseRREF::clocknow();
 		std::atomic<size_t> cc = 0;
 		pool.detach_blocks<size_t>(0, leftrows.size(), [&](const size_t s, const size_t e) {
 			auto id = SparseRREF::thread_id();
@@ -900,27 +1008,26 @@ namespace SparseRREF {
 			}
 			}, ((n_split < 20 * pool.get_thread_count()) ? 0 : leftrows.size() / 10));
 
-		bool print_once = true;
-
 		if (verbose) {
-			double old_status = 1.0 * sub_pivots.size() * cc.load(std::memory_order_relaxed) / leftrows.size();
 			while (cc.load(std::memory_order_relaxed) < leftrows.size()) {
 				double status = 1.0 * sub_pivots.size() * cc.load(std::memory_order_relaxed) / leftrows.size();
-				if (!print_once && status - old_status <= (double)printstep) {
+				double done = (double)process + status;
+				if (done - tprogress.last_count <= (double)printstep) {
 					if (pool.wait_for(progress_poll_interval))
 						break; // pool idle, no further progress can be reported
 					continue;
 				}
+				auto now = SparseRREF::clocknow();
 				now_nnz = mat.nnz();
 				progress(opt, "Row")
-					.add("%*zu/%zu", bitlen_nrow, process + (size_t)status, rank)
+					.add("%*zu/%zu", bitlen_nrow, (size_t)done, rank)
 					.add("  nnz: %*zu", bitlen_nnz, now_nnz)
 					.add("  density: %8.6g%%", density_percent(now_nnz, mat.nrow, mat.ncol))
-					.add("  speed: %6.6g row/s", rate_per_second(status - old_status, SparseRREF::usedtime(clock_begin, SparseRREF::clocknow())))
+					.add("  speed: %6.6g row/s", rate_per_second(done - tprogress.last_count, SparseRREF::usedtime(tprogress.last_time, now)))
 					.add("    ");
-				clock_begin = SparseRREF::clocknow();
-				old_status = status;
-				print_once = false;
+				tprogress.last_time = now;
+				tprogress.last_count = done;
+				tprogress.reported = true;
 			}
 		}
 
@@ -930,7 +1037,7 @@ namespace SparseRREF {
 		opt->verbose = verbose;
 		process += sub_pivots.size();
 
-		triangular_solver_2_rec(mat, tranmat, left_pivots, F, opt, g_helper, n_split, rank, process);
+		triangular_solver_2_rec(mat, tranmat, left_pivots, F, opt, g_helper, n_split, rank, process, tprogress);
 	}
 
 	template <typename T, typename index_t>
@@ -967,9 +1074,26 @@ namespace SparseRREF {
 		// TODO: better split strategy
 		size_t n_split = std::max(pivots.size() / 128ULL, 1ULL << 10);
 		size_t rank = pivots.size();
-		triangular_solver_2_rec(mat, tranmat, pivots, F, opt, g_helper, n_split, rank, process);
+		triangular_progress_t tprogress{ SparseRREF::clocknow(), 0.0, false };
+		triangular_solver_2_rec(mat, tranmat, pivots, F, opt, g_helper, n_split, rank, process, tprogress);
 
-		if (opt->verbose)
+		// A level can only report while it is still polling, so the tail of the phase
+		// (everything done after the last report) would stay invisible without this.
+		if (opt->verbose && pivots.size() >= n_split && rank > tprogress.last_count) {
+			auto now = SparseRREF::clocknow();
+			size_t now_nnz = mat.nnz();
+			int bitlen_nnz = num_digits(now_nnz) + 1;
+			progress(opt, "Row")
+				.add("%*zu/%zu", num_digits(rank), rank, rank)
+				.add("  nnz: %*zu", bitlen_nnz, now_nnz)
+				.add("  density: %8.6g%%", density_percent(now_nnz, mat.nrow, mat.ncol))
+				.add("  speed: %6.6g row/s",
+					rate_per_second(rank - tprogress.last_count, SparseRREF::usedtime(tprogress.last_time, now)))
+				.add("    ");
+			tprogress.reported = true;
+		}
+
+		if (opt->verbose && tprogress.reported)
 			progress_end(opt);
 	}
 
@@ -1157,7 +1281,7 @@ namespace SparseRREF {
 			// upper solver
 			// TODO: check mode
 			std::atomic<size_t> cc = 0;
-			size_t old_cc = cc;
+			size_t old_cc = cc.load(std::memory_order_relaxed);
 			pool.detach_blocks<size_t>(0, leftrows.size(), [&](const size_t s, const size_t e) {
 				auto id = SparseRREF::thread_id();
 				schur_helper<T, index_t> helper(g_helper, id);
@@ -1217,12 +1341,6 @@ namespace SparseRREF {
 
 		pool.detach_loop(0, mat.nrow, [&](auto i) { mat[i].compress(); });
 
-		size_t now_nnz = mat.nnz();
-		double density = (double)now_nnz / (mat.nrow * mat.ncol);
-		auto schur_complete_func = &schur_complete_buffer<T, index_t, 10>;
-		if (100 * density > 0.01)
-			schur_complete_func = &schur_complete<T, index_t>;
-
 		// store the pivots that have been used
 		// sv is not used
 		std::vector<index_t> rowpivs(mat.nrow, sv);
@@ -1230,6 +1348,12 @@ namespace SparseRREF {
 		std::vector<pivot_t<index_t>> n_pivots;
 
 		pool.wait();
+
+		size_t now_nnz = mat.nnz();
+		double density = (double)now_nnz / (mat.nrow * mat.ncol);
+		auto schur_complete_func = &schur_complete_buffer<T, index_t, 10>;
+		if (100 * density > 0.01)
+			schur_complete_func = &schur_complete<T, index_t>;
 
 		if (opt->abort)
 			return pivots;
@@ -1355,7 +1479,8 @@ namespace SparseRREF {
 
 			auto print_info = [&](size_t kk, size_t x, bool& print_once, double& oldpr) {
 				double pr = kk + (1.0 * ps.size() * x) / leftrows.size();
-				if (opt->verbose && (print_once || pr - oldpr > opt->print_step)) {
+				// require real progress, otherwise a round-entry report would show speed 0
+				if (opt->verbose && pr > oldpr && (print_once || pr - oldpr > opt->print_step)) {
 					auto end = clocknow();
 					now_nnz = mat.nnz();
 					auto now_alloc = mat.alloc();
@@ -1694,7 +1819,8 @@ namespace SparseRREF {
 
 			auto print_info = [&](size_t kk, size_t x, bool& print_once, double& oldpr) {
 				double pr = kk + (1.0 * ps.size() * x) / leftrows.size();
-				if (verbose && (print_once || pr - oldpr > printstep)) {
+				// require real progress, otherwise a round-entry report would show speed 0
+				if (verbose && pr > oldpr && (print_once || pr - oldpr > printstep)) {
 					auto end = SparseRREF::clocknow();
 					now_nnz = mat.nnz();
 					auto now_alloc = mat.alloc();
@@ -2091,8 +2217,8 @@ namespace SparseRREF {
 		for (size_t i = 0; i < nonpivs.size(); i++)
 			nonpivs_ord[nonpivs[i]] = (index_t)i;
 
-		for (auto i = 0; i < nonpivs.size(); i++) {
-			K[nonpivs[i]].push_back(i, m1);
+		for (size_t i = 0; i < nonpivs.size(); i++) {
+			K[nonpivs[i]].push_back((index_t)i, m1);
 		}
 
 		for (auto [r, c] : pivots) {
@@ -2229,16 +2355,16 @@ namespace SparseRREF {
 	}
 
 	// IO
-	template <typename ScalarType, typename index_t, typename T>
-	sparse_mat<ScalarType, index_t> sparse_mat_read(T& st, const field_t& F) {
+	template <typename T, typename index_t, typename S>
+	sparse_mat<T, index_t> sparse_mat_read(S& st, const field_t& F) {
 		if (!st.is_open()) {
 			std::cerr << "Error: sparse_mat_read: file not open." << std::endl;
-			return sparse_mat<ScalarType, index_t>();
+			return sparse_mat<T, index_t>();
 		}
 
 		std::string line;
 		std::vector<size_t> dims;
-		sparse_mat<ScalarType, index_t> mat;
+		sparse_mat<T, index_t> mat;
 
 		while (std::getline(st, line)) {
 			if (line.empty() || line[0] == '%')
@@ -2257,9 +2383,9 @@ namespace SparseRREF {
 				// size_t nnz = string_to_ull(line.substr(start));
 				if (dims.size() != 2) {
 					std::cerr << "Error: sparse_mat_read: wrong format in the matrix file" << std::endl;
-					return sparse_mat<ScalarType, index_t>();
+					return sparse_mat<T, index_t>();
 				}
-				mat = sparse_mat<ScalarType, index_t>(dims[0], dims[1]);
+				mat = sparse_mat<T, index_t>(dims[0], dims[1]);
 			}
 			break;
 		}
@@ -2295,16 +2421,19 @@ namespace SparseRREF {
 
 			if (count != 2) {
 				std::cerr << "Error: sparse_mat_read: wrong format in the matrix file" << std::endl;
-				return sparse_mat<ScalarType, index_t>();
+				return sparse_mat<T, index_t>();
 			}
 
-			ScalarType val;
-			if constexpr (std::is_same_v<ScalarType, ulong>) {
+			T val{};
+			if constexpr (std::is_same_v<T, ulong>) {
 				rat_t raw_val(line.substr(start));
 				val = raw_val % F.mod;
 			}
-			else if constexpr (std::is_same_v<ScalarType, rat_t>) {
+			else if constexpr (std::is_same_v<T, rat_t>) {
 				val = rat_t(line.substr(start));
+			}
+			else if constexpr (std::is_same_v<T, int_t>) {
+				val = int_t(line.substr(start));
 			}
 
 			mat[rowcol[0]].push_back(rowcol[1], val);

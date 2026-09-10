@@ -369,16 +369,18 @@ namespace SparseRREF {
 	}
 
 	// time
+	// The value is only ever used as a difference of two samples, so take it from
+	// the steady clock: a wall clock that steps backwards would make a progress
+	// report divide by a non-positive interval, i.e. print a bogus "0" speed.
 	inline std::chrono::system_clock::time_point clocknow() {
-		return std::chrono::system_clock::now();
+		return std::chrono::system_clock::time_point(
+			std::chrono::duration_cast<std::chrono::system_clock::duration>(
+				std::chrono::steady_clock::now().time_since_epoch()));
 	}
 
 	inline double usedtime(std::chrono::system_clock::time_point start,
 		std::chrono::system_clock::time_point end) {
-		auto duration =
-			std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-		return ((double)duration.count() * std::chrono::microseconds::period::num /
-			std::chrono::microseconds::period::den);
+		return std::chrono::duration<double>(end - start).count();
 	}
 
 	// some algorithms
