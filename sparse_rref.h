@@ -419,6 +419,19 @@ namespace SparseRREF {
 		return 0;
 	}
 
+	// a set of indices has to be in range and pairwise distinct: a repeated index would make the tail
+	// of an index vector a non permutation and silently misplace the entries of a contraction
+	inline bool in_range_and_distinct(const std::vector<size_t>& idx, const size_t rank) {
+		for (size_t k = 0; k < idx.size(); k++) {
+			if (idx[k] >= rank)
+				return false;
+			for (size_t l = 0; l < k; l++)
+				if (idx[k] == idx[l])
+					return false;
+		}
+		return true;
+	}
+
 	// multi for
 	template <typename Func>
 	void multi_for(

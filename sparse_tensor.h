@@ -212,13 +212,14 @@ namespace SparseRREF {
 			ptr--;
 		}
 
-		// if ptr1 > 0, and ptr > 0
-		for (size_t i = ptr1; i < ptr; i++) {
-			A.val(i) = 0;
+		// the merged entries were written at the end and A's untouched prefix is at the front,
+		// so [ptr1, ptr) only holds stale copies: slide the merged part down to close the gap
+		const size_t total = A.nnz();
+		for (size_t i = 0; i < total - ptr; i++) {
+			s_copy(A.index(ptr1 + i), A.index(ptr + i), rank);
+			A.val(ptr1 + i) = A.val(ptr + i);
 		}
-
-		// // then remove the zero entries
-		// A.canonicalize();
+		A.resize(ptr1 + (total - ptr));
 	}
 
 	// the result is sorted
@@ -239,6 +240,13 @@ namespace SparseRREF {
 
 		if (i1.size() == 0) {
 			return tensor_product(A, B, F);
+		}
+
+		// the indices of a contract set have to be in range and pairwise distinct: a repeated index
+		// would make the tail of the index vector a non permutation and silently misplace the entries
+		if (!in_range_and_distinct(i1, A.rank()) || !in_range_and_distinct(i2, B.rank())) {
+			std::cerr << "Error: tensor_contract: The contract indices are out of range or repeated." << std::endl;
+			return sparse_tensor<T, index_type, SPARSE_COO>();
 		}
 
 		auto dimsA = A.dims();
@@ -462,26 +470,46 @@ namespace SparseRREF {
 		return tensor_contract(A, B, std::vector<size_t>{ i }, std::vector<size_t>{ j }, F, pool);
 	}
 
-	// the result is not sorted
+	// contract the a-th index of A with the 0-th index of B, then move the remaining indices of B into
+	// the slot of the contracted index: the result has rank A.rank() + B.rank() - 2 and the order
+	// [A[0..a-1], B[1], A[a+1..], B[2..]], so that contracting with a matrix reads like a matrix
+	// product. The result is sorted unless sort_ind is false.
 	template <typename index_type, typename T>
 	sparse_tensor<T, index_type, SPARSE_COO> tensor_contract_2(
 		const sparse_tensor<T, index_type, SPARSE_COO>& A,
 		const sparse_tensor<T, index_type, SPARSE_COO>& B,
-		const index_type a, const field_t& F, thread_pool* pool = nullptr, const bool sort_ind = true) {
+		const size_t a, const field_t& F, thread_pool* pool = nullptr, const bool sort_ind = true) {
 
-		auto C = tensor_contract(A, B, a, 0, F, pool);
-		std::vector<size_t> perm;
-		for (size_t k = 0; k < A.rank() + B.rank() - 1; k++) {
-			perm.push_back(k);
+		const size_t rankA = A.rank();
+		const size_t rankB = B.rank();
+
+		if (rankA == 0 || rankB == 0 || a >= rankA) {
+			std::cerr << "Error: tensor_contract_2: cannot contract index " << a << " of a rank " << rankA
+				<< " tensor with a rank " << rankB << " tensor." << std::endl;
+			return sparse_tensor<T, index_type, SPARSE_COO>();
 		}
-		perm.erase(perm.begin() + A.rank() - 1);
-		perm.insert(perm.begin() + a, A.rank() - 1);
+
+		// tensor_contract returns the order [A except a] ++ [B except 0], so perm[i] is the old slot of
+		// the new slot i, and the rank of the result fixes the size of perm
+		auto C = tensor_contract(A, B, a, 0, F, pool);
+
+		std::vector<size_t> perm;
+		perm.reserve(rankA + rankB - 2);
+		for (size_t k = 0; k < a; k++)
+			perm.push_back(k);
+		if (rankB > 1)
+			perm.push_back(rankA - 1);
+		for (size_t k = a; k + 1 < rankA; k++)
+			perm.push_back(k);
+		for (size_t k = rankA; k + 1 < rankA + rankB - 1; k++)
+			perm.push_back(k);
+
 		C.transpose_replace(perm, pool, sort_ind);
 
 		return C;
 	}
 
-	// self contraction
+	// self contraction: C[rest] = sum_k A[..., i=k, ..., j=k, ...], requires i != j
 	template <typename index_type, typename T>
 	sparse_tensor<T, index_type, SPARSE_COO> tensor_contract(
 		const sparse_tensor<T, index_type, SPARSE_COO>& A,
@@ -490,11 +518,19 @@ namespace SparseRREF {
 		using index_v = std::vector<index_type>;
 		using index_p = index_type*;
 
+		if (i >= A.rank() || j >= A.rank()) {
+			std::cerr << "Error: tensor_contract: cannot contract index " << i << " and " << j << " of a rank "
+				<< A.rank() << " tensor." << std::endl;
+			return sparse_tensor<T, index_type, SPARSE_COO>();
+		}
+
+		if (i == j) {
+			std::cerr << "Error: tensor_contract: The two contraction indices must be different." << std::endl;
+			return sparse_tensor<T, index_type, SPARSE_COO>();
+		}
+
 		if (i > j)
 			return tensor_contract(A, j, i, F, pool);
-
-		if (i == j)
-			return A; // do nothing
 
 		// then i < j
 
@@ -548,18 +584,30 @@ namespace SparseRREF {
 		sparse_tensor<T, index_type, SPARSE_COO> C(dimsC);
 
 		if (pool != nullptr) {
-			auto nthread = pool->get_thread_count();
-			std::vector<sparse_tensor<T, index_type, SPARSE_COO>> Cs(nthread, C);
+			const size_t nrows = rowptr.size() - 1;
+			const size_t nblocks = std::min(pool->get_thread_count(), nrows);
+			const size_t base = nrows / nblocks;
+			const size_t rem = nrows % nblocks;
 
-			pool->detach_blocks(0, rowptr.size() - 1, [&](size_t ss, size_t ee) {
+			// the blocks (not the threads) fix the order of the merged result, since the
+			// scheduler decides which thread runs which block
+			std::vector<std::pair<size_t, size_t>> ranges(nblocks);
+			std::vector<sparse_tensor<T, index_type, SPARSE_COO>> Cs(nblocks, C);
+
+			size_t start = 0;
+			for (size_t blk = 0; blk < nblocks; blk++) {
+				ranges[blk] = { start, start + base + (blk < rem ? 1 : 0) };
+				start = ranges[blk].second;
+			}
+
+			auto method = [&](const size_t blk) {
 				index_v indexC;
 				indexC.reserve(rank - 2);
-				for (size_t k = ss; k < ee; k++) {
+				for (size_t k = ranges[blk].first; k < ranges[blk].second; k++) {
 					// from rowptr[k] to rowptr[k + 1] are the same
 					auto start = rowptr[k];
 					auto end = rowptr[k + 1];
 					T entry = 0;
-					auto id = thread_id();
 					for (size_t m = start; m < end; m++) {
 						entry = scalar_add(entry, A.val(equal_ind_list[perm[m]]), F);
 					}
@@ -568,32 +616,34 @@ namespace SparseRREF {
 						for (size_t l = 0; l < A.rank(); l++)
 							if (l != i && l != j)
 								indexC.push_back(A.index(equal_ind_list[perm[start]])[l]);
-						Cs[id].push_back(indexC, entry);
+						Cs[blk].push_back(indexC, entry);
 					}
-				}}, nthread);
-
-				pool->wait();
-
-				// merge the results
-				size_t allnnz = 0;
-				size_t nownnz = 0;
-				for (size_t i = 0; i < nthread; i++) {
-					allnnz += Cs[i].nnz();
 				}
+				};
 
-				C.reserve(allnnz);
-				C.resize(allnnz);
-				for (size_t i = 0; i < nthread; i++) {
-					// it is ordered, so we can directly push them back
-					auto tmpnnz = Cs[i].nnz();
-					T* valptr = C.data.valptr + nownnz;
-					index_p colptr = C.data.colptr + nownnz * C.rank();
-					s_copy(colptr, Cs[i].data.colptr, tmpnnz * C.rank());
-					for (size_t j = 0; j < tmpnnz; j++)
-						valptr[j] = std::move(Cs[i].data.valptr[j]);
-					nownnz += tmpnnz;
-					Cs[i].clear();
-				}
+			pool->detach_sequence(0, nblocks, method);
+			pool->wait();
+
+			// merge the results: the blocks cover increasing rows, so Cs is ordered
+			size_t allnnz = 0;
+			std::vector<size_t> start_pos(nblocks);
+			for (size_t blk = 0; blk < nblocks; blk++) {
+				start_pos[blk] = allnnz;
+				allnnz += Cs[blk].nnz();
+			}
+
+			C.reserve(allnnz);
+			C.resize(allnnz);
+			pool->detach_loop(0, nblocks, [&](size_t blk) {
+				auto tmpnnz = Cs[blk].nnz();
+				T* valptr = C.data.valptr + start_pos[blk];
+				index_p colptr = C.data.colptr + start_pos[blk] * C.rank();
+				s_copy(colptr, Cs[blk].data.colptr, tmpnnz * C.rank());
+				for (size_t m = 0; m < tmpnnz; m++)
+					valptr[m] = std::move(Cs[blk].data.valptr[m]);
+				Cs[blk].clear();
+				});
+			pool->wait();
 		}
 		else {
 			index_v indexC;
@@ -624,6 +674,13 @@ namespace SparseRREF {
 		const sparse_tensor<T, index_type, SPARSE_COO>& A,
 		const sparse_tensor<T, index_type, SPARSE_COO>& B,
 		const field_t& F, thread_pool* pool = nullptr) {
+
+		// otherwise A.rank() - 1 wraps around
+		if (A.rank() == 0 || B.rank() == 0) {
+			std::cerr << "Error: tensor_dot: cannot contract a rank 0 tensor." << std::endl;
+			return sparse_tensor<T, index_type, SPARSE_COO>();
+		}
+
 		return tensor_contract(A, B, A.rank() - 1, 0, F, pool);
 	}
 
@@ -637,6 +694,14 @@ namespace SparseRREF {
 		const size_t start_index, const field_t& F, thread_pool* pool = nullptr) {
 
 		auto rank = A.rank();
+		if (start_index >= rank) {
+			std::cerr << "Error: tensor_transform: cannot start at index " << start_index << " of a rank "
+				<< rank << " tensor." << std::endl;
+			return sparse_tensor<T, index_type, SPARSE_COO>();
+		}
+
+		// A keeps its relative index order (B's remaining indices are appended at the end), so the next
+		// index to contract with B is again at start_index: i only counts the contractions
 		auto C = tensor_contract(A, B, start_index, 0, F, pool);
 		for (size_t i = start_index + 1; i < rank; i++) {
 			C = tensor_contract(C, B, start_index, 0, F, pool);
@@ -652,6 +717,13 @@ namespace SparseRREF {
 		const size_t start_index, const field_t& F, thread_pool* pool = nullptr) {
 
 		auto rank = A.rank();
+		if (start_index >= rank) {
+			std::cerr << "Error: tensor_transform_replace: cannot start at index " << start_index << " of a rank "
+				<< rank << " tensor." << std::endl;
+			return;
+		}
+
+		// start_index does not move either, see tensor_transform
 		for (size_t i = start_index; i < rank; i++) {
 			A = tensor_contract(A, B, start_index, 0, F, pool);
 		}
@@ -679,7 +751,7 @@ namespace SparseRREF {
 			std::cerr << "Error: einstein_sum: The number of tensors does not match the number of index sets." << std::endl;
 			return sparse_tensor<T, index_type, SPARSE_COO>();
 		}
-		for (size_t i = 1; i < nt; i++) {
+		for (size_t i = 0; i < nt; i++) {
 			if (tensors[i]->rank() != index_sets[i].size()) {
 				std::cerr << "Error: einstein_sum: The rank of the tensor does not match the index set." << std::endl;
 				return sparse_tensor<T, index_type, SPARSE_COO>();

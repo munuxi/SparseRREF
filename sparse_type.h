@@ -2034,6 +2034,16 @@ namespace SparseRREF {
 		}
 
 		void convert_from_COO(const sparse_tensor<T, index_t, SPARSE_COO>& l, thread_pool* pool = nullptr) {
+			// a rank 0 tensor has no CSR form: there is no row index to build the rowptr from, and the
+			// data.dims[0] reads below would be out of bounds. The empty matrix is all that CSR can
+			// express here, so report the lost entries and return it
+			if (l.rank() == 0) {
+				if (l.nnz() != 0)
+					std::cerr << "Error: sparse_tensor: a rank 0 tensor cannot be converted to CSR" << std::endl;
+				data.clear();
+				data.init({ 0, 0 });
+				return;
+			}
 			// Note: require sorted/perm to ensure correctness
 			data.dims = l.data.dims;
 			data.rank = l.data.rank;
@@ -2093,6 +2103,16 @@ namespace SparseRREF {
 		}
 
 		void move_from_COO(sparse_tensor<T, index_t, SPARSE_COO>&& l, thread_pool* pool = nullptr) noexcept {
+			// a rank 0 tensor has no CSR form: there is no row index to build the rowptr from, and the
+			// data.dims[0] reads below would be out of bounds. The empty matrix is all that CSR can
+			// express here, so report the lost entries and return it
+			if (l.rank() == 0) {
+				if (l.nnz() != 0)
+					std::cerr << "Error: sparse_tensor: a rank 0 tensor cannot be converted to CSR" << std::endl;
+				data.clear();
+				data.init({ 0, 0 });
+				return;
+			}
 			// Note: require sorted/perm to ensure correctness
 			// use move to avoid memory problems, then no need to mention l
 			data = std::move(l.data);
@@ -2118,8 +2138,10 @@ namespace SparseRREF {
 			for (size_t i = 0; i < data.dims[0]; i++)
 				rowptr[i + 1] += rowptr[i];
 			data.rowptr = rowptr;
-			data.colptr = s_realloc<index_t>(data.colptr, nnz * (newrank - 1));
 			data.rank = newrank;
+			// colptr only holds nnz * (rank - 1) indices now, so alloc must not claim more than that:
+			// a later copy reads exactly alloc * (rank - 1) of them
+			data.reserve(nnz);
 		}
 
 		// constructor from COO
@@ -2246,7 +2268,13 @@ namespace SparseRREF {
 			data.init(prepend_num(l, (size_t)1), aoc);
 		}
 
-		sparse_tensor() {}
+		// the empty state is a valid rank 0 tensor, so that nnz(), rank(), dims() and
+		// check_sorted() stay well defined on a tensor returned by a failed call
+		sparse_tensor() {
+			data.rank = 1;
+			data.dims = { 1 };
+			data.rowptr = { 0, 0 };
+		}
 		~sparse_tensor() {}
 		sparse_tensor(const std::vector<size_t>& l, size_t aoc = 8) : data(prepend_num(l, (size_t)1), aoc) {}
 		sparse_tensor(const sparse_tensor& l) : data(l.data) {}
@@ -2456,34 +2484,73 @@ namespace SparseRREF {
 			return mat;
 		}
 
-		std::vector<size_t> gen_perm() const {
-			std::vector<size_t> perm = perm_init(nnz());
+		// the permutation that orders the entries by the labels at the positions listed in order, or by
+		// all the labels in the natural order when order is nullptr
+		// the entries are usually already in that order, because the callers hand in tensors that were
+		// built sorted or returned by an operation that sorts: verifying it costs one cheap pass, so
+		// the identity permutation is returned as soon as the check succeeds
+		std::vector<size_t> gen_perm_by(const std::vector<size_t>* order) const {
+			// the comparators are written out twice instead of going through a common lambda: they run
+			// once per entry of the sort, where an extra branch on order costs more than the pass above
+			const auto r = rank();
+			const auto nz = nnz();
+			bool sorted = true;
+			if (order == nullptr) {
+				for (size_t i = 1; i < nz && sorted; i++)
+					sorted = lexico_compare(index(i - 1), index(i), r) <= 0;
+			}
+			else {
+				for (size_t i = 1; i < nz && sorted; i++)
+					sorted = lexico_compare(index(i - 1), index(i), *order) <= 0;
+			}
 
-			auto r = rank();
-			std::sort(std::execution::par, perm.begin(), perm.end(), [&](size_t a, size_t b) {
-				return lexico_compare(index(a), index(b), r) < 0;
-				});
+			std::vector<size_t> perm = perm_init(nz);
+			if (sorted)
+				return perm;
+
+			if (order == nullptr) {
+				std::sort(std::execution::par, perm.begin(), perm.end(), [&](size_t a, size_t b) {
+					return lexico_compare(index(a), index(b), r) < 0;
+					});
+			}
+			else {
+				std::sort(std::execution::par, perm.begin(), perm.end(), [&](size_t a, size_t b) {
+					return lexico_compare(index(a), index(b), *order) < 0;
+					});
+			}
 			return perm;
 		}
 
+		std::vector<size_t> gen_perm() const { return gen_perm_by(nullptr); }
+
 		std::vector<size_t> gen_perm(const std::vector<size_t>& index_perm) const {
+			// index_perm is a permutation of the positions of the index vector, so it must have
+			// exactly rank() entries; the caller is expected to check this, we only degrade to the
+			// natural order here instead of handing back a perm of the wrong size
 			if (index_perm.size() != rank()) {
 				std::cerr << "Error: gen_perm: index_perm size is not equal to rank" << std::endl;
-				exit(1);
+				return gen_perm();
 			}
 
-			if (std::is_sorted(index_perm.begin(), index_perm.end()))
-				return gen_perm();
-
-			std::vector<size_t> perm = perm_init(nnz());
-			std::sort(std::execution::par, perm.begin(), perm.end(), [&](size_t a, size_t b) {
-				return lexico_compare(index(a), index(b), index_perm) < 0;
-				});
-
-			return perm;
+			return gen_perm_by(&index_perm);
 		}
 
 		void transpose_replace(const std::vector<size_t>& perm, thread_pool* pool = nullptr, const bool sort_ind = true) {
+			// perm[i] is the old position of the new i-th index, so perm has to be a permutation of
+			// [0, rank()); anything else would read out of bounds below
+			std::vector<bool> used(rank(), false);
+			bool valid = perm.size() == rank();
+			for (size_t i = 0; valid && i < perm.size(); i++) {
+				if (perm[i] >= rank() || used[perm[i]])
+					valid = false;
+				else
+					used[perm[i]] = true;
+			}
+			if (!valid) {
+				std::cerr << "Error: transpose_replace: perm must be a permutation of the indices" << std::endl;
+				return;
+			}
+
 			std::vector<size_t> new_dims(rank() + 1);
 			new_dims[0] = data.dims[0];
 

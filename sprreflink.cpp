@@ -269,14 +269,14 @@ EXTERN_C DLLEXPORT int sprref_mod_tensor_contract(WolframLibraryData ld, mint Ar
 
 	std::vector<size_t> idxA(startA, startA + lenA);
 	std::vector<size_t> idxB(startB, startB + lenB);
-	for (auto& i : idxA) {
+	for (auto& i : idxA)
 		i--; // change to zero-based index
-		if (i >= tensorA.rank()) { return LIBRARY_FUNCTION_ERROR; }
-	}
-	for (auto& i : idxB) {
+	for (auto& i : idxB)
 		i--;
-		if (i >= tensorB.rank()) { return LIBRARY_FUNCTION_ERROR; }
-	}
+
+	// a contract index out of range or repeated makes tensor_contract place the entries wrongly
+	if (!in_range_and_distinct(idxA, tensorA.rank()) || !in_range_and_distinct(idxB, tensorB.rank()))
+		return LIBRARY_FUNCTION_ERROR;
 
 	field_t F(FIELD_Fp, (ulong)p);
 	int err = 0;
@@ -359,14 +359,14 @@ EXTERN_C DLLEXPORT int sprref_rat_tensor_contract(WolframLibraryData ld, mint Ar
 			tensorB = std::move(B);
 		}
 		
-		for (auto& i : idxA) {
+		for (auto& i : idxA)
 			i--; // change to zero-based index
-			if (i >= tensorA.rank()) { return LIBRARY_FUNCTION_ERROR; }
-		}
-		for (auto& i : idxB) {
+		for (auto& i : idxB)
 			i--;
-			if (i >= tensorB.rank()) { return LIBRARY_FUNCTION_ERROR; }
-		}
+
+		// a contract index out of range or repeated makes tensor_contract place the entries wrongly
+		if (!in_range_and_distinct(idxA, tensorA.rank()) || !in_range_and_distinct(idxB, tensorB.rank()))
+			return LIBRARY_FUNCTION_ERROR;
 
 		auto tensorC = tensor_contract(tensorA, tensorB, idxA, idxB, F, pool_ptr);
 		sparse_tensor<rat_t, int, SPARSE_CSR> C(std::move(tensorC), pool_ptr);
