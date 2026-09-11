@@ -60,7 +60,8 @@ namespace SparseRREF {
 
 		size_t ptr1 = vec.nnz();
 		size_t ptr2 = src.nnz();
-		size_t ptr = vec.nnz() + src.nnz();
+		const size_t nnz_new = ptr1 + ptr2;
+		size_t ptr = nnz_new;
 
 		if (vec.alloc() < ptr)
 			vec.reserve(ptr);
@@ -99,12 +100,16 @@ namespace SparseRREF {
 			ptr--;
 		}
 
-		// if ptr1 > 0, and ptr > 0
-		for (size_t i = ptr1; i < ptr; i++) {
-			vec[i] = 0;
+		const size_t res_nnz = nnz_new - ptr;
+		const size_t gap = ptr - ptr1;
+		if (gap != 0) {
+			std::memmove(vec.indices + ptr1, vec.indices + ptr,
+				res_nnz * sizeof(index_t));
+			std::memmove(vec.entries + ptr1, vec.entries + ptr,
+				res_nnz * sizeof(ulong));
 		}
+		vec.resize(ptr1 + res_nnz);
 
-		vec.canonicalize();
 		if (vec.alloc() > 4 * vec.nnz())
 			vec.reserve(2 * vec.nnz());
 

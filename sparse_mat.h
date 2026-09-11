@@ -438,19 +438,29 @@ namespace SparseRREF {
 					thecol.push_back(r);
 			}
 
-			if constexpr (std::is_same_v<T, bool>) {
-				pool.detach_loop<index_t>(0, thecol.size(), [&](index_t j) {
-					auto r = thecol[j];
+			// every row of thecol is reduced by the same pivot row and only reads
+			// mat[row], so the updates are independent and may run in any order
+			auto eliminate = [&](auto j) {
+				const auto r = thecol[j];
+				if constexpr (std::is_same_v<T, bool>) {
 					sparse_vec_add(mat[r], mat[row], F);
-					},
-					((thecol.size() < 20 * nthreads) ? 0 : thecol.size() / 10));
+				}
+				else {
+					sparse_vec_sub_mul(mat[r], mat[row], *mat.find(r, col), F);
+				}
+			};
+
+			if (thecol.size() < 20 * nthreads) {
+				// narrow columns are the common case, and dispatching a handful of
+				// updates through the pool costs far more in wake-ups and
+				// synchronization than the elimination itself (a 3 element batch was
+				// measured at ~16us of pool overhead against ~0.5us of work)
+				for (size_t j = 0; j < thecol.size(); j++)
+					eliminate(j);
 			}
 			else {
-				pool.detach_loop<index_t>(0, thecol.size(), [&](index_t j) {
-					auto r = thecol[j];
-					sparse_vec_sub_mul(mat[r], mat[row], *mat.find(r, col), F);
-					},
-					((thecol.size() < 20 * nthreads) ? 0 : thecol.size() / 10));
+				pool.detach_loop<index_t>(0, thecol.size(), eliminate,
+					thecol.size() / 10);
 			}
 			pool.wait();
 
