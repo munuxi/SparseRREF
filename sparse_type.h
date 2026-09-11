@@ -1959,7 +1959,13 @@ namespace SparseRREF {
 
 		void clear() { data.clear(); }
 
-		sparse_tensor() {}
+		// the empty state is a valid 0 x 0 matrix, so that nnz(), dim(), check_sorted() and the
+		// rowptr bookkeeping stay well defined on a tensor returned by a rejected call
+		sparse_tensor() {
+			data.rank = 2;
+			data.dims = { 0, 0 };
+			data.rowptr = { 0 };
+		}
 		~sparse_tensor() {}
 		sparse_tensor(const std::vector<size_t> l, size_t aoc = 8) : data(l, aoc) {}
 		sparse_tensor(const sparse_tensor& l) : data(l.data) {}
@@ -1997,7 +2003,7 @@ namespace SparseRREF {
 		// index vector (row index included at first) of the i-th entry
 		index_v index_vector(const size_t i) const {
 			index_v result(rank());
-			result[0] = data.row_index(i);
+			result[0] = static_cast<index_t>(data.row_index(i));
 			for (size_t j = 1; j < rank(); j++)
 				result[j] = index(i)[j - 1];
 			return result;

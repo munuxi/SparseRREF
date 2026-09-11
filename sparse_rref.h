@@ -450,14 +450,18 @@ namespace SparseRREF {
 		while (true) {
 			func(index);
 
-			for (int i = nt - 1; i > -2; i--) {
-				if (i == -1)
-					return;
-				index[i]++;
-				if (index[i] < end[i])
+			// odometer over [start, end), resetting each index that overflowed and carrying into the
+			// next one; a carry out of the last index means the ranges were exhausted
+			bool carried = true;
+			for (size_t i = nt; i-- > 0;) {
+				if (++index[i] < end[i]) {
+					carried = false;
 					break;
+				}
 				index[i] = start[i];
 			}
+			if (carried)
+				return;
 		}
 	}
 

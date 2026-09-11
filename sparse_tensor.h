@@ -13,7 +13,8 @@
 #include "sparse_type.h"
 
 namespace SparseRREF {
-	// we assume that A, B are sorted, then C is also sorted
+	// A and B need not be sorted: gen_perm() visits both in index order, so the index tuples are
+	// concatenated in lexicographic order and C is sorted as well
 	template <typename index_type, typename T>
 	sparse_tensor<T, index_type, SPARSE_COO> tensor_product(
 		const sparse_tensor<T, index_type, SPARSE_COO>& A,
@@ -393,8 +394,8 @@ namespace SparseRREF {
 					}
 
 					if (entry != 0) {
-						for (size_t l = 0; l < left_size_B; l++)
-							indexC[left_size_A + l] = B.index(permB[startB])[index_perm_B[l]];
+						for (size_t j = 0; j < left_size_B; j++)
+							indexC[left_size_A + j] = B.index(permB[startB])[index_perm_B[j]];
 
 						C.push_back(indexC, entry);
 					}
@@ -424,7 +425,7 @@ namespace SparseRREF {
 
 			std::vector<std::pair<size_t, size_t>> ranges(nblocks);
 			size_t start = 0;
-			for (int i = 0; i < nblocks; ++i) {
+			for (size_t i = 0; i < nblocks; ++i) {
 				size_t end = start + base + (i < rem ? 1 : 0);
 				ranges[i] = { start, end };
 				start = end;
@@ -1014,7 +1015,7 @@ namespace SparseRREF {
 
 			while (end != std::string::npos && count < dims.size()) {
 				if (start != end) {
-					index.push_back(string_to_ull(line.substr(start, end - start)) - 1);
+					index.push_back(static_cast<IndexType>(string_to_ull(line.substr(start, end - start)) - 1));
 					count++;
 				}
 				start = end + 1;
@@ -1066,8 +1067,8 @@ namespace SparseRREF {
 			index_buf.clear();
 			const auto& index = tensor.index(i);
 			for (size_t j = 0; j < rank; ++j) {
-				auto [ptr, ec] = std::to_chars(num_buf, num_buf + sizeof(num_buf), index[j] + 1);
-				index_buf.insert(index_buf.end(), num_buf, ptr);
+				auto conv = std::to_chars(num_buf, num_buf + sizeof(num_buf), index[j] + 1);
+				index_buf.insert(index_buf.end(), num_buf, conv.ptr);
 				index_buf.push_back(' ');
 			}
 			st.write(index_buf.data(), index_buf.size());
