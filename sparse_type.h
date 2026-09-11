@@ -39,34 +39,46 @@ namespace SparseRREF {
 			T& val;
 		};
 
-		struct iterator {
-			index_t* ind_ptr;
-			T* val_ptr;
-
-			iterator& operator++() { ind_ptr++; val_ptr++; return *this; }
-			iterator operator++(int) { iterator tmp = *this; ind_ptr++; val_ptr++; return tmp; }
-			iterator& operator--() { ind_ptr--; val_ptr--; return *this; }
-			iterator operator--(int) { iterator tmp = *this; ind_ptr--; val_ptr--; return tmp; }
-			iterator& operator+=(size_t n) { ind_ptr += n; val_ptr += n; return *this; }
-			iterator& operator-=(size_t n) { ind_ptr -= n; val_ptr -= n; return *this; }
-			iterator operator+(size_t n) const { iterator tmp = *this; tmp += n; return tmp; }
-			iterator operator-(size_t n) const { iterator tmp = *this; tmp -= n; return tmp; }
-			bool operator==(const iterator& other) const { return ind_ptr == other.ind_ptr; }
-			bool operator!=(const iterator& other) const { return ind_ptr != other.ind_ptr; }
-
-			de_iterator_ref operator*() const { return { *ind_ptr, *val_ptr }; }
+		struct de_const_iterator_ref {
+			const index_t& ind;
+			const T& val;
 		};
+
+		// the value type must stay dependent on the pointer type, so that a const sparse_vec
+		// hands out references that cannot be used to modify it
+		template <typename ind_p, typename val_p, typename ref> struct basic_iterator {
+			ind_p ind_ptr;
+			val_p val_ptr;
+
+			basic_iterator& operator++() { ind_ptr++; val_ptr++; return *this; }
+			basic_iterator operator++(int) { basic_iterator tmp = *this; ind_ptr++; val_ptr++; return tmp; }
+			basic_iterator& operator--() { ind_ptr--; val_ptr--; return *this; }
+			basic_iterator operator--(int) { basic_iterator tmp = *this; ind_ptr--; val_ptr--; return tmp; }
+			basic_iterator& operator+=(size_t n) { ind_ptr += n; val_ptr += n; return *this; }
+			basic_iterator& operator-=(size_t n) { ind_ptr -= n; val_ptr -= n; return *this; }
+			basic_iterator operator+(size_t n) const { basic_iterator tmp = *this; tmp += n; return tmp; }
+			basic_iterator operator-(size_t n) const { basic_iterator tmp = *this; tmp -= n; return tmp; }
+			bool operator==(const basic_iterator& other) const { return ind_ptr == other.ind_ptr; }
+			bool operator!=(const basic_iterator& other) const { return ind_ptr != other.ind_ptr; }
+
+			ref operator*() const { return { *ind_ptr, *val_ptr }; }
+		};
+
+		using iterator = basic_iterator<index_t*, T*, de_iterator_ref>;
+		using const_iterator = basic_iterator<const index_t*, const T*, de_const_iterator_ref>;
 
 		// functions of iterator 
 		iterator begin() { return { indices, entries }; }
 		iterator end() { return { indices + _nnz, entries + _nnz }; }
-		iterator begin() const { return { indices, entries }; }
-		iterator end() const { return { indices + _nnz, entries + _nnz }; }
-		iterator cbegin() const { return { indices, entries }; }
-		iterator cend() const { return { indices + _nnz, entries + _nnz }; }
+		const_iterator begin() const { return { indices, entries }; }
+		const_iterator end() const { return { indices + _nnz, entries + _nnz }; }
+		const_iterator cbegin() const { return { indices, entries }; }
+		const_iterator cend() const { return { indices + _nnz, entries + _nnz }; }
 
-		auto index_span() const { return std::span<index_t>(indices, _nnz); }
-		auto entry_span() const { return std::span<T>(entries, _nnz); }
+		std::span<index_t> index_span() { return std::span<index_t>(indices, _nnz); }
+		std::span<const index_t> index_span() const { return std::span<const index_t>(indices, _nnz); }
+		std::span<T> entry_span() { return std::span<T>(entries, _nnz); }
+		std::span<const T> entry_span() const { return std::span<const T>(entries, _nnz); }
 
 		// C++23 is needed for zip_view
 		// auto index_view() const { return std::ranges::subrange(indices, indices + _nnz); }
@@ -296,10 +308,11 @@ namespace SparseRREF {
 		T& operator[](const size_t pos) { return entries[pos]; }
 		const T& operator[](const size_t pos) const { return entries[pos]; }
 
-		T* find(const index_t index, const bool isbinary = true) const {
+		// the entry with this index, or nullptr when there is none
+		const T* find(const index_t index, const bool isbinary = true) const {
 			if (_nnz == 0)
 				return nullptr;
-			index_t* ptr;
+			const index_t* ptr;
 			if (isbinary)
 				ptr = SparseRREF::binary_search(indices, indices + _nnz, index);
 			else
@@ -307,6 +320,10 @@ namespace SparseRREF {
 			if (ptr == indices + _nnz)
 				return nullptr;
 			return entries + (ptr - indices);
+		}
+
+		T* find(const index_t index, const bool isbinary = true) {
+			return const_cast<T*>(std::as_const(*this).find(index, isbinary));
 		}
 
 		// conversion functions
@@ -399,7 +416,8 @@ namespace SparseRREF {
 		size_t _nnz = 0;
 		size_t _alloc = 0;
 
-		auto index_span() const { return std::span<index_t>(indices, _nnz); }
+		std::span<index_t> index_span() { return std::span<index_t>(indices, _nnz); }
+		std::span<const index_t> index_span() const { return std::span<const index_t>(indices, _nnz); }
 
 		sparse_vec() {
 			indices = nullptr;
@@ -521,7 +539,11 @@ namespace SparseRREF {
 		sparse_vec<T, index_t>& operator[](const size_t i) { return rows[i]; }
 		const sparse_vec<T, index_t>& operator[](const size_t i) const { return rows[i]; }
 
-		T* find(const size_t row, const index_t col, const bool isbinary = true) const {
+		T* find(const size_t row, const index_t col, const bool isbinary = true) {
+			return rows[row].find(col, isbinary);
+		}
+
+		const T* find(const size_t row, const index_t col, const bool isbinary = true) const {
 			return rows[row].find(col, isbinary);
 		}
 
@@ -612,7 +634,7 @@ namespace SparseRREF {
 			rows.shrink_to_fit();
 		}
 
-		sparse_mat<T, index_t> transpose() {
+		sparse_mat<T, index_t> transpose() const {
 			sparse_mat<T, index_t> res(ncol, nrow);
 			for (size_t i = 0; i < ncol; i++)
 				res[i].zero();
@@ -974,6 +996,10 @@ namespace SparseRREF {
 			return { colptr + rowptr[i] * (rank - 1), valptr + rowptr[i] };
 		}
 
+		std::pair<const_index_p, const T*> row(const size_t i) const {
+			return { colptr + rowptr[i] * (rank - 1), valptr + rowptr[i] };
+		}
+
 		index_p entry_lower_bound(const_index_p l) {
 			auto begin = row(l[0]).first;
 			auto end = row(l[0] + 1).first;
@@ -983,6 +1009,18 @@ namespace SparseRREF {
 		}
 
 		index_p entry_lower_bound(const index_v& l) {
+			return entry_lower_bound(l.data());
+		}
+
+		const_index_p entry_lower_bound(const_index_p l) const {
+			auto begin = row(l[0]).first;
+			auto end = row(l[0] + 1).first;
+			if (begin == end)
+				return end;
+			return SparseRREF::lower_bound(begin, end, l + 1, rank - 1);
+		}
+
+		const_index_p entry_lower_bound(const index_v& l) const {
 			return entry_lower_bound(l.data());
 		}
 
@@ -996,6 +1034,19 @@ namespace SparseRREF {
 		}
 
 		index_p entry_ptr(const index_v& l) {
+			return entry_ptr(l.data());
+		}
+
+		const_index_p entry_ptr(const_index_p l) const {
+			auto ptr = entry_lower_bound(l);
+			auto end = row(l[0] + 1).first;
+			if (ptr == end || std::equal(ptr, ptr + rank - 1, l + 1))
+				return ptr;
+			else
+				return end;
+		}
+
+		const_index_p entry_ptr(const index_v& l) const {
 			return entry_ptr(l.data());
 		}
 
@@ -1976,10 +2027,14 @@ namespace SparseRREF {
 		size_t alloc() const { return data.alloc; }
 		size_t rank() const { return data.rank; }
 		size_t nnz() const { return data.rowptr[data.dims[0]]; }
-		auto& rowptr() const { return data.rowptr; }
-		auto& colptr() const { return data.colptr; }
-		auto& valptr() const { return data.valptr; }
-		auto& dims() const { return data.dims; }
+		auto& rowptr() { return data.rowptr; }
+		const auto& rowptr() const { return data.rowptr; }
+		index_p colptr() { return data.colptr; }
+		const_index_p colptr() const { return data.colptr; }
+		T* valptr() { return data.valptr; }
+		const T* valptr() const { return data.valptr; }
+		auto& dims() { return data.dims; }
+		const auto& dims() const { return data.dims; }
 		size_t dim(const size_t i) const { return data.dims[i]; }
 		index_p index(const size_t i) { return data.colptr + i * (rank() - 1); }
 		const_index_p index(const size_t i) const { return data.colptr + i * (rank() - 1); }
@@ -2289,8 +2344,10 @@ namespace SparseRREF {
 		sparse_tensor& operator=(sparse_tensor&& l) noexcept { data = std::move(l.data); return *this; }
 
 		// for the i-th column, return the indices
-		index_p index(size_t i) const { return data.colptr + i * rank(); }
-		T& val(size_t i) const { return data.valptr[i]; }
+		index_p index(size_t i) { return data.colptr + i * rank(); }
+		const_index_p index(size_t i) const { return data.colptr + i * rank(); }
+		T& val(size_t i) { return data.valptr[i]; }
+		const T& val(size_t i) const { return data.valptr[i]; }
 
 		index_v index_vector(size_t i) const {
 			index_v result(rank());
@@ -2450,13 +2507,17 @@ namespace SparseRREF {
 			return B;
 		}
 
-		sparse_mat<T, index_t> to_sparse_mat(thread_pool* pool = nullptr, const bool sort_ind = true) {
+		sparse_mat<T, index_t> to_sparse_mat(thread_pool* pool = nullptr, const bool sort_ind = true) const {
 			if (rank() != 2) {
 				std::cerr << "sparse_tensor.to_sparse_mat: rank must be 2" << std::endl;
 				return sparse_mat<T, index_t>();
 			}
-			if (sort_ind)
-				sort_indices(pool);
+			// sorting cannot be done in place on a const tensor: sort a copy and convert that
+			if (sort_ind && !check_sorted()) {
+				sparse_tensor sorted(*this);
+				sorted.sort_indices(pool);
+				return sorted.to_sparse_mat(pool, false);
+			}
 			auto r = dim(0);
 			auto c = dim(1);
 			auto rptr = rowptr();
@@ -2894,7 +2955,7 @@ namespace SparseRREF {
 	// to save memory, if rows[0] > mat.nrow, then it is a full view
 	template <typename T, typename index_t>
 	struct sparse_mat_subview {
-		sparse_mat<T, index_t>* mat_ptr = nullptr;
+		const sparse_mat<T, index_t>* mat_ptr = nullptr;
 		std::vector<size_t> rows;
 
 		sparse_mat_subview() = default;
@@ -2906,7 +2967,7 @@ namespace SparseRREF {
 		}
 
 		sparse_mat_subview(const sparse_mat<T, index_t>& mat_) {
-			mat_ptr = const_cast<sparse_mat<T, index_t>*>(&mat_);
+			mat_ptr = &mat_;
 			rows = { mat_.nrow + 1 }; // full view
 		}
 
@@ -2966,26 +3027,28 @@ namespace SparseRREF {
 			return false;
 		}
 
-		// access the i-th row of the subview, it is dangerous because we do not check the index
-		sparse_vec<T, index_t>& operator[](size_t i) {
-			if (rows[0] > mat_ptr->nrow) // full view
-				return (*mat_ptr)[i];
-			return (*mat_ptr)[rows[i]];
-		}
-		const sparse_vec<T, index_t>& operator[](size_t i) const {
-			if (rows[0] > mat_ptr->nrow) // full view
-				return (*mat_ptr)[i];
-			return (*mat_ptr)[rows[i]];
-		}
-
-		const size_t operator()(size_t i) const {
+		// the index of the i-th row in the underlying matrix, it is dangerous because we do
+		// not check the index
+		size_t row_of(const size_t i) const {
 			if (rows[0] > mat_ptr->nrow) // full view
 				return i;
 			return rows[i];
 		}
 
+		// access the i-th row of the subview, it is dangerous because we do not check the index
+		sparse_vec<T, index_t>& operator[](size_t i) {
+			return const_cast<sparse_mat<T, index_t>&>(*mat_ptr)[row_of(i)];
+		}
+		const sparse_vec<T, index_t>& operator[](size_t i) const {
+			return (*mat_ptr)[row_of(i)];
+		}
+
+		const size_t operator()(size_t i) const {
+			return row_of(i);
+		}
+
 		sparse_mat<T, index_t>& get_mat() {
-			return *mat_ptr;
+			return const_cast<sparse_mat<T, index_t>&>(*mat_ptr);
 		}
 		const sparse_mat<T, index_t>& get_mat() const {
 			return *mat_ptr;

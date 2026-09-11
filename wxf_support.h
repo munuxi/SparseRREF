@@ -52,7 +52,7 @@ namespace SparseRREF {
 		}
 
 		template <typename T>
-			requires std::is_same_v<T, ulong> || std::is_same_v<T, int_t> || std::is_same_v<T, rat_t>
+			requires std::is_same_v<std::remove_cv_t<T>, ulong> || std::is_same_v<std::remove_cv_t<T>, int_t> || std::is_same_v<std::remove_cv_t<T>, rat_t>
 		inline uint8_t vals_array_num_type(const std::span<T> vals) {
 			if (vals.empty())
 				return 0;

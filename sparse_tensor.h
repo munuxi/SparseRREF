@@ -482,7 +482,7 @@ namespace SparseRREF {
 				val_B[k] = B.val(permB[k]);
 		}
 
-		auto equal_except = [](const index_p a, const index_p b, const std::vector<size_t>& perm, const size_t len) {
+		auto equal_except = [](const index_type* a, const index_type* b, const std::vector<size_t>& perm, const size_t len) {
 			for (size_t i = 0; i < len; i++) {
 				if (a[perm[i]] != b[perm[i]])
 					return false;
@@ -992,7 +992,7 @@ namespace SparseRREF {
 
 		std::vector<size_t> rowptr;
 		rowptr.push_back(0);
-		auto equal_except_ij = [&](const index_p a, const index_p b) {
+		auto equal_except_ij = [&](const index_type* a, const index_type* b) {
 			// do not compare the i-th and j-th index
 			for (size_t k = 0; k < rank; k++)
 				if (k != i && k != j && a[k] != b[k])
