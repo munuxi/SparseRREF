@@ -2496,10 +2496,16 @@ namespace SparseRREF {
 		// built sorted or returned by an operation that sorts: verifying it costs one cheap pass, so
 		// the identity permutation is returned as soon as the check succeeds
 		std::vector<size_t> gen_perm_by(const std::vector<size_t>* order) const {
-			// the comparators are written out twice instead of going through a common lambda: they run
-			// once per entry of the sort, where an extra branch on order costs more than the pass above
 			const auto r = rank();
 			const auto nz = nnz();
+			// the counting passes below keep one bucket per label, so only the orderings whose
+			// dimensions add up to a manageable number of buckets are counted
+			constexpr size_t max_buckets = 1u << 20;
+			// below this many entries, waking the threads costs more than the work that they share
+			constexpr size_t par_threshold = 1u << 14;
+			// a single pass is only worth sharing much later: the tensors that hold a few hundred
+			// thousand entries still walk their index array faster than the threads are started
+			constexpr size_t par_pass_threshold = 1u << 18;
 			bool sorted = true;
 			if (order == nullptr) {
 				for (size_t i = 1; i < nz && sorted; i++)
@@ -2514,17 +2520,92 @@ namespace SparseRREF {
 			if (sorted)
 				return perm;
 
-			if (order == nullptr) {
-				std::sort(std::execution::par, perm.begin(), perm.end(), [&](size_t a, size_t b) {
-					return lexico_compare(index(a), index(b), r) < 0;
-					});
+			// the ordering can also be obtained by counting the labels one position at a time: a
+			// label is smaller than the dimension of its position, so each counting pass only
+			// needs a bucket per label, which is much cheaper than comparing tuples when the
+			// dimensions are small; the positions are counted from the last to the first, so that
+			// the first one decides the order, and one pass is stable, so the passes compose
+			const size_t len = order == nullptr ? r : order->size();
+			size_t buckets = 0;
+			bool countable = len > 0 && len <= r;
+			for (size_t l = 0; l < len && countable; l++) {
+				const size_t d = dim(order == nullptr ? l : (*order)[l]);
+				countable = d > 0 && d <= max_buckets - buckets;
+				buckets += d;
 			}
-			else {
-				std::sort(std::execution::par, perm.begin(), perm.end(), [&](size_t a, size_t b) {
-					return lexico_compare(index(a), index(b), *order) < 0;
-					});
+
+			// the ordering by comparisons, which is what the counting passes fall back on when they
+			// cannot be used or when they meet an entry that steps outside its dimensions
+			auto by_comparison = [&]() {
+				// the comparators are written out twice instead of going through a common lambda, and so
+				// are the two policies: the branch on order runs once per entry of the sort, where an
+				// extra branch costs more than the pass above, and waking the threads costs more than
+				// the comparisons for a tensor that holds few entries
+				if (nz >= par_threshold) {
+					if (order == nullptr)
+						std::sort(std::execution::par, perm.begin(), perm.end(), [&](size_t a, size_t b) {
+							return lexico_compare(index(a), index(b), r) < 0;
+							});
+					else
+						std::sort(std::execution::par, perm.begin(), perm.end(), [&](size_t a, size_t b) {
+							return lexico_compare(index(a), index(b), *order) < 0;
+							});
+					return perm;
+				}
+				if (order == nullptr)
+					std::sort(perm.begin(), perm.end(), [&](size_t a, size_t b) {
+						return lexico_compare(index(a), index(b), r) < 0;
+						});
+				else
+					std::sort(perm.begin(), perm.end(), [&](size_t a, size_t b) {
+						return lexico_compare(index(a), index(b), *order) < 0;
+						});
+				return perm;
+				};
+
+			if (countable) {
+				std::vector<index_t> label(nz);
+				std::vector<size_t> next(nz);
+				std::vector<size_t> count;
+				for (size_t l = len; l-- > 0;) {
+					const size_t pos = order == nullptr ? l : (*order)[l];
+					const size_t d = dim(pos);
+
+					count.assign(d, 0);
+					// the labels are read through the permutation, which walks the index array at random
+					// once the pass above has grouped the entries, so a tensor that holds many entries
+					// hands the read to the threads; those labels then sit next to each other, and the
+					// pass that counts them watches them, since a label at or above its dimension would
+					// index outside the buckets, and one entry that says so sends the ordering back to
+					// the comparisons
+					if (nz < par_pass_threshold)
+						for (size_t i = 0; i < nz; i++)
+							label[i] = index(perm[i])[pos];
+					else
+						std::transform(std::execution::par, perm.begin(), perm.end(), label.begin(),
+							[&](const size_t p) { return index(p)[pos]; });
+
+					for (size_t i = 0; i < nz; i++) {
+						const auto value = label[i];
+						if (value < 0 || static_cast<size_t>(value) >= d)
+							return by_comparison();
+						count[value]++;
+					}
+
+					size_t start = 0;
+					for (size_t b = 0; b < d; b++) {
+						const size_t c = count[b];
+						count[b] = start;
+						start += c;
+					}
+					for (size_t i = 0; i < nz; i++)
+						next[count[label[i]]++] = perm[i];
+					perm.swap(next);
+				}
+				return perm;
 			}
-			return perm;
+
+			return by_comparison();
 		}
 
 		std::vector<size_t> gen_perm() const { return gen_perm_by(nullptr); }
