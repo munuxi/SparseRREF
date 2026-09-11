@@ -33,6 +33,22 @@
     - "Threads": number of threads (Integer >= 0, with 0 meaning automatic).
     - "Verbose": True | False.
     - "PrintStep": Integer (print progress every n steps).
+    - "LogStream":
+      None: progress output is written to the kernel's stdout (default).
+      Automatic: progress lines are printed in this session as they are produced.
+      "Dynamic": progress is shown in a single temporary output cell, which is refreshed
+        a few times per second while the computation runs. Use this in a notebook: the
+        library may emit hundreds of lines, and appending all of them as separate cells
+        is what makes the front end sluggish. Without a front end "Dynamic" falls back to
+        Automatic.
+      stream: progress lines are written to the OutputStream stream as they are produced.
+      All but None also collect the lines, which SparseRREFLog[] then returns; they imply
+      "Verbose" -> True, since the library only reports when it is verbose.
+      The collected lines are kept even if the computation is aborted.
+    
+  SparseRREFLog[]
+    Returns the log of the most recent SparseRREF call that used the "LogStream"
+    option, as a String with one line per entry.
     
   SparseMatMul[matA, matB, opts]
     Computes the matrix multiplication of two sparse matrices.
@@ -80,6 +96,21 @@
     mat = SparseArray @ { {1, 0, 2}, {1/2, 1/3, 1/4} };
     rref = SparseRREF[mat];
     {rref, kernel, pivots} = SparseRREF[mat, "OutputMode" -> "RREF,Kernel,Pivots", "Method" -> "Right", "BackwardSubstitution" -> True, "Threads" -> $ProcessorCount, "Verbose" -> True, "PrintStep" -> 10];
+    
+    (* --- Log stream example --- *)
+    log = OpenWrite["rref.log"];
+    (* "LogStream" -> Automatic prints the progress in this session instead *)
+    rref = SparseRREF[mat, "LogStream" -> log, "PrintStep" -> 10];
+    Close[log];
+    (* the log of that call is also available as a string *)
+    logText = SparseRREFLog[];
+    
+    (* --- Log stream in a notebook --- *)
+    (* "LogStream" -> "Dynamic" refreshes the progress in a single temporary cell
+       instead of emitting one output cell per line *)
+    rref = SparseRREF[mat, "LogStream" -> "Dynamic", "PrintStep" -> 10];
+    (* the lines that were displayed, all of them, are still available afterwards *)
+    logText = SparseRREFLog[];
     
     (* Finite Field *)
     mat = SparseArray @ { {10, 0, 20}, {30, 40, 50} };
@@ -137,7 +168,8 @@ Options[SparseRREF] = {
   "BackwardSubstitution" -> True,
   "Threads" -> 1,
   "Verbose" -> False,
-  "PrintStep" -> 100
+  "PrintStep" -> 100,
+  "LogStream" -> None
 };
 
 SparseRREF::usage =
@@ -150,6 +182,12 @@ SyntaxInformation[SparseRREF] = {"ArgumentsPattern" -> {_, OptionsPattern[]}}
 SparseRREF::findlib = "SparseRREF library \"`1`\" not found at `2`";
 SparseRREF::optionvalue = "Invalid SparseRREF option value: `1` -> `2`. Allowed values: `3`";
 SparseRREF::rettype = "SparseRREF should return SparseArray or List, but returned: `1`";
+
+
+SparseRREFLog::usage =
+  "SparseRREFLog[] returns the log of the most recent SparseRREF call that used the " <>
+  "\"LogStream\" option, as a String with one line per entry. The log of an aborted " <>
+  "call is returned as well.";
 
 
 Options[SparseMatMul] = {
@@ -246,7 +284,8 @@ ratRREFLibFunction =
       True | False,
       Integer,
       True | False,
-      Integer
+      Integer,
+      True | False
     },
     {LibraryDataType[ByteArray], Automatic}
   ];
@@ -263,7 +302,8 @@ modRREFLibFunction =
       True | False,
       Integer,
       True | False,
-      Integer
+      Integer,
+      True | False
     },
     {LibraryDataType[ByteArray], Automatic}
   ];
@@ -415,6 +455,45 @@ parseVerbose[b_] := throwOptionError["Verbose", b, {True, False}];
 parsePrintStep[ps_?IntegerQ] /; ps > 0 := ps;
 parsePrintStep[ps_] := throwOptionError["PrintStep", ps, "1,2,3..."];
 
+parseLogStream[None | Null] := None;
+parseLogStream[Automatic] := Automatic;
+parseLogStream["Dynamic"] := "Dynamic";
+parseLogStream[stream_OutputStream] := stream;
+parseLogStream[ls_] := throwOptionError["LogStream", ls, "None, Automatic, \"Dynamic\" or an OutputStream"];
+
+logStreamQ[None] = False;
+logStreamQ[_] = True;
+
+
+(* Kernel log stream *)
+
+(* Progress lines produced by the library are evaluated back into the kernel as
+   sprrefLogPush["..."], as soon as they are produced. The destination is taken
+   from $logDestination, which SparseRREF[] sets up for the duration of a call,
+   and the lines are collected in $logLines so that SparseRREFLog[] can return
+   them afterwards. *)
+$logDestination = None;
+$logLines = {};
+
+(* Last line received so far, how many lines arrived, and the delay between two
+   refreshes of the temporary cell that "LogStream" -> "Dynamic" uses. *)
+$logLatest = "";
+$logCount = 0;
+$logRefresh = 0.2;
+
+sprrefLogPush[line_String] := (
+  (* nested instead of AppendTo[], to keep this O(1) per line *)
+  $logLines = {$logLines, line};
+  $logCount = $logCount + 1;
+  Switch[$logDestination,
+    Automatic, Print[line],
+    "Dynamic", $logLatest = line,
+    _OutputStream, WriteString[$logDestination, line, "\n"]; Flush[$logDestination],
+    _, Null
+  ];
+  Null
+);
+
 checkResult[msg_, res_, pattern_] :=
   If[MatchQ[res, pattern],
     res,
@@ -422,6 +501,17 @@ checkResult[msg_, res_, pattern_] :=
     Throw[$Failed]
   ];
 SetAttributes[checkResult, HoldFirst];
+
+
+(* Temporary output cell used by "LogStream" -> "Dynamic": a single cell that is
+   refreshed in place, instead of one output cell per progress line. The cell is
+   removed when the computation finishes (or is aborted); the lines that went
+   through it stay available through SparseRREFLog[]. *)
+printLogCell[] := PrintTemporary @ Dynamic[
+  Row[{"SparseRREF: ", $logCount, " line(s)  ", $logLatest}],
+  UpdateInterval -> $logRefresh,
+  TrackedSymbols :> {$logCount, $logLatest}
+];
 
 
 (* Define public function SparseRREF[] *)
@@ -435,17 +525,40 @@ SparseRREF[mat_SparseArray, opts : OptionsPattern[] ] :=
       $backwardSubstitution = parseBackwardSubstitution @ OptionValue["BackwardSubstitution"],
       $threads = parseThreads @ OptionValue["Threads"],
       $verbose = parseVerbose @ OptionValue["Verbose"],
-      $printStep = parsePrintStep @ OptionValue["PrintStep"]
+      $printStep = parsePrintStep @ OptionValue["PrintStep"],
+      $logStream = parseLogStream @ OptionValue["LogStream"]
     },
-    checkResult[
-      SparseRREF::rettype,
-      If[$modulus == 0,
-        ratRREF[mat, $outputMode, $method, $backwardSubstitution, $threads, $verbose, $printStep],
-        modRREF[mat, $modulus, $outputMode, $method, $backwardSubstitution, $threads, $verbose, $printStep]
-      ],
-      _SparseArray | _List
+    If[logStreamQ[$logStream], $logLines = {}];
+    Block[
+      {
+        (* without a front end there is no cell to refresh, print the lines instead *)
+        $logDestination = If[$logStream === "Dynamic" && ! $Notebooks, Automatic, $logStream],
+        $logLatest = "",
+        $logCount = 0,
+        $logCell = If[$logStream === "Dynamic" && $Notebooks, printLogCell[], Null],
+        $result
+      },
+      Internal`WithLocalSettings[
+        Null,
+        $result = checkResult[
+          SparseRREF::rettype,
+          If[$modulus == 0,
+            ratRREF[mat, $outputMode, $method, $backwardSubstitution, $threads,
+              $verbose || logStreamQ[$logStream], $printStep, logStreamQ[$logStream]],
+            modRREF[mat, $modulus, $outputMode, $method, $backwardSubstitution, $threads,
+              $verbose || logStreamQ[$logStream], $printStep, logStreamQ[$logStream]]
+          ],
+          _SparseArray | _List
+        ],
+        (* the temporary cell is normally removed when the evaluation finishes; remove it
+           here too, so that a computation that is aborted does not leave it behind *)
+        If[MatchQ[$logCell, _CellObject], Quiet @ NotebookDelete[$logCell]]
+      ];
+      $result
     ]
   ];
+
+SparseRREFLog[] := StringRiffle[Flatten[$logLines], "\n"];
 
 ratRREF[
     mat_SparseArray,
@@ -454,7 +567,8 @@ ratRREF[
     backwardSubstitution_?BooleanQ,
     threads_?IntegerQ,
     verbose_?BooleanQ,
-    printStep_?IntegerQ
+    printStep_?IntegerQ,
+    log_?BooleanQ
   ] :=
   BinaryDeserialize @ ratRREFLibFunction[
     BinarySerialize[mat],
@@ -463,7 +577,8 @@ ratRREF[
     backwardSubstitution,
     threads,
     verbose,
-    printStep
+    printStep,
+    log
   ];
 
 modRREF[
@@ -474,7 +589,8 @@ modRREF[
     backwardSubstitution_?BooleanQ,
     threads_?IntegerQ,
     verbose_?BooleanQ,
-    printStep_?IntegerQ
+    printStep_?IntegerQ,
+    log_?BooleanQ
   ] :=
   BinaryDeserialize @ modRREFLibFunction[
     mat,
@@ -484,7 +600,8 @@ modRREF[
     backwardSubstitution,
     threads,
     verbose,
-    printStep
+    printStep,
+    log
   ];
 
 

@@ -2145,7 +2145,7 @@ namespace SparseRREF {
 				}
 		}
 
-		while (!isok) {
+		while (!isok && !opt->abort) {
 			isok = true;
 			prime = n_nextprime(prime, 0);
 			auto ce = clocknow();
@@ -2161,7 +2161,13 @@ namespace SparseRREF {
 				matul[i] = mat[i] % F.mod;
 				});
 			pool.wait();
+			if (opt->abort)
+				break;
 			sparse_mat_direct_rref(matul, pivots, F, opt);
+			// the direct rref bails out early when aborting, which can leave matul
+			// structurally different from matz, so stop before the CRT loop below
+			if (opt->abort)
+				break;
 			if (opt->is_back_sub) {
 				opt->verbose = false;
 				triangular_solver_2(matul, pivots, F, opt);
@@ -2169,6 +2175,8 @@ namespace SparseRREF {
 			std::vector<int> flags(nthreads, 1);
 
 			pool.detach_loop<size_t>(0, leftrows.size(), [&](size_t i) {
+				if (opt->abort)
+					return;
 				size_t row = leftrows[i];
 				auto id = SparseRREF::thread_id();
 				for (size_t j = 0; j < matul[row].nnz(); j++) {
@@ -2179,6 +2187,9 @@ namespace SparseRREF {
 				});
 
 			pool.wait();
+			if (opt->abort)
+				break;
+
 			for (auto f : flags)
 				isok = isok && f;
 
@@ -2189,6 +2200,9 @@ namespace SparseRREF {
 				isok = check_height_condition(matq, mod, m_height);
 		}
 		opt->verbose = verbose;
+
+		if (opt->abort)
+			return pivots;
 
 		if (opt->verbose) {
 			progress_message(opt, "** Reconstruct success! Using mod ~ 2^%llu.                \n",

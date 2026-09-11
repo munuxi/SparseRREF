@@ -123,6 +123,18 @@ mat = SparseArray @ { {1, 0, 2}, {1/2, 1/3, 1/4} };
 rref = SparseRREF[mat];
 {rref, kernel, pivots} = SparseRREF[mat, "OutputMode" -> "RREF,Kernel,Pivots", "Method" -> "Right", "BackwardSubstitution" -> True, "Threads" -> $ProcessorCount, "Verbose" -> True, "PrintStep" -> 10];
 
+(* progress lines can be forwarded to the kernel while the computation runs *)
+log = OpenWrite["rref.log"];
+(* or "LogStream" -> Automatic to print them in this session *)
+rref = SparseRREF[mat, "LogStream" -> log, "PrintStep" -> 10];
+Close[log];
+SparseRREFLog[] (* the log of that call, as a String *)
+
+(* in a notebook, "LogStream" -> "Dynamic" refreshes the progress in a single
+   temporary output cell instead of emitting one output cell per line *)
+rref = SparseRREF[mat, "LogStream" -> "Dynamic", "PrintStep" -> 10];
+SparseRREFLog[] (* every line, not only the last one shown in the cell *)
+
 (* integers mod p *)
 mat = SparseArray @ { {10, 0, 20}, {30, 40, 50} };
 p = 7;

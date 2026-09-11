@@ -21,6 +21,11 @@
 	```
 	See detailed instructions in SparseRREF.wl and in Readme.md.
 
+	Progress output can be redirected to the kernel: the last argument of the two
+	rref functions is a flag that, when True, makes every progress line be
+	evaluated as SparseRREF`Private`sprrefLogPush["<line>"] while the computation
+	is still running. This is what the "LogStream" option of the package uses.
+
 	To load the functions in Mathematica manually, use the following code (as an example):
 
 	```mathematica
@@ -36,7 +41,8 @@
 		  True | False,
 		  Integer,
 		  True | False,
-		  Integer
+		  Integer,
+		  True | False
 		},
 		{LibraryDataType[ByteArray], Automatic}
 	  ];
@@ -53,7 +59,8 @@
 		  True | False,
 		  Integer,
 		  True | False,
-		  Integer
+		  Integer,
+		  True | False
 		},
 		{LibraryDataType[ByteArray], Automatic}
 	  ];
@@ -68,6 +75,7 @@
 	```
 */
 
+#include <streambuf>
 #include <string>
 #include <utility>
 #include "sparse_mat.h"
@@ -85,6 +93,92 @@ EXTERN_C DLLEXPORT mint WolframLibrary_getVersion() {
 
 EXTERN_C DLLEXPORT int WolframLibrary_initialize(WolframLibraryData ld) {
     return LIBRARY_NO_ERROR;
+}
+
+/*
+	Kernel log stream.
+
+	The progress output of a computation can be redirected to the Mathematica
+	kernel: every completed line is evaluated as
+
+		SparseRREF`Private`sprrefLogPush["<line>"]
+
+	while the library function is still running, so the package can display the
+	line right away (and keep it for a later SparseRREFLog[] call).
+*/
+namespace {
+
+	// evaluateExpression is only usable with this mode value, the others crash the kernel
+	constexpr int LIBRARY_EVALUATE_EXPRESSION = 6;
+
+	// escape a line so that it can be embedded in a Wolfram Language string literal
+	std::string escape_wl_string(const std::string& line) {
+		std::string out;
+		out.reserve(line.size() + 8);
+		for (unsigned char c : line) {
+			switch (c) {
+			case '\\': out += "\\\\"; break;
+			case '"': out += "\\\""; break;
+			case '\t': out += "\\t"; break;
+			default:
+				// other control characters would not survive the round trip
+				out += (c < 0x20 || c == 0x7f) ? ' ' : (char)c;
+			}
+		}
+		return out;
+	}
+
+	void kernel_log_push(WolframLibraryData ld, const std::string& line) {
+		if (ld->evaluateExpression == nullptr)
+			return;
+		std::string expression = "SparseRREF`Private`sprrefLogPush[\"" + escape_wl_string(line) + "\"]";
+		ld->evaluateExpression(ld, expression.data(), LIBRARY_EVALUATE_EXPRESSION, 0, nullptr);
+	}
+
+	// Hands every completed line to the kernel. Progress lines always end with a
+	// newline (a custom stream is never a terminal, so nothing is overwritten in
+	// place); blank lines are dropped, they carry no information.
+	class kernel_log_streambuf : public std::streambuf {
+	public:
+		explicit kernel_log_streambuf(WolframLibraryData ld) : ld_(ld) {}
+
+	protected:
+		int_type overflow(int_type c) override {
+			if (traits_type::eq_int_type(c, traits_type::eof()))
+				return traits_type::not_eof(c);
+			push(traits_type::to_char_type(c));
+			return c;
+		}
+
+		std::streamsize xsputn(const char* s, std::streamsize n) override {
+			for (std::streamsize i = 0; i < n; i++)
+				push(s[i]);
+			return n;
+		}
+
+		int sync() override {
+			emit_line();
+			return 0;
+		}
+
+	private:
+		void push(char c) {
+			if (c == '\n')
+				emit_line();
+			else if (c != '\r')
+				line_ += c;
+		}
+
+		void emit_line() {
+			if (line_.empty())
+				return;
+			kernel_log_push(ld_, line_);
+			line_.clear();
+		}
+
+		WolframLibraryData ld_;
+		std::string line_;
+	};
 }
 
 sparse_mat<ulong> MSparseArray_to_sparse_mat_ulong(WolframLibraryData ld, MArgument* arg, ulong p) {
@@ -501,7 +595,7 @@ EXTERN_C DLLEXPORT int sprref_rat_matmul(WolframLibraryData ld, mint Argc, MArgu
 // 2: output the rref and its pivots
 // 3: output the rref, kernel and pivots
 EXTERN_C DLLEXPORT int sprref_mod_rref(WolframLibraryData ld, mint Argc, MArgument* Args, MArgument Res) {
-	if (Argc != 8)
+	if (Argc != 9)
 		return LIBRARY_FUNCTION_ERROR;
 	auto mat_in = MArgument_getMSparseArray(Args[0]);
 	auto p = MArgument_getInteger(Args[1]);
@@ -511,6 +605,7 @@ EXTERN_C DLLEXPORT int sprref_mod_rref(WolframLibraryData ld, mint Argc, MArgume
 	auto nthreads = MArgument_getInteger(Args[5]);
 	auto verbose = MArgument_getBoolean(Args[6]);
 	auto print_step = MArgument_getInteger(Args[7]);
+	auto log_to_kernel = MArgument_getBoolean(Args[8]);
 
 	numericarray_data_t type = MNumericArray_Type_UBit8;
 	auto sf = ld->sparseLibraryFunctions;
@@ -531,12 +626,18 @@ EXTERN_C DLLEXPORT int sprref_mod_rref(WolframLibraryData ld, mint Argc, MArgume
 	{
 		field_t F(FIELD_Fp, p);
 
+		// progress lines are forwarded to the kernel while the computation runs
+		kernel_log_streambuf log_buffer(ld);
+		std::ostream log_stream(&log_buffer);
+
 		rref_option_t opt;
 		opt->method = method;
 		opt->is_back_sub = is_back_sub;
 		opt->pool.reset(nthreads);
-		opt->verbose = verbose;
+		opt->verbose = verbose || log_to_kernel;
 		opt->print_step = print_step;
+		if (log_to_kernel)
+			opt->progress_out = &log_stream;
 
 		std::atomic<bool> cancel(false);
 		std::thread check_cancel([&]() {
@@ -549,6 +650,13 @@ EXTERN_C DLLEXPORT int sprref_mod_rref(WolframLibraryData ld, mint Argc, MArgume
 			});
 
 		auto pivots = sparse_mat_rref(mat, F, opt);
+		if (opt->abort) {
+			// the matrix is only partially reduced, so nothing below is
+			// meaningful (and evaluating it could read outside of its vectors)
+			cancel = true;
+			check_cancel.join();
+			return LIBRARY_FUNCTION_ERROR;
+		}
 		std::vector<pivot_t<int>> pivots_vec;
 		for (auto& p : pivots) {
 			pivots_vec.insert(pivots_vec.end(), p.begin(), p.end());
@@ -652,7 +760,7 @@ EXTERN_C DLLEXPORT int sprref_mod_rref(WolframLibraryData ld, mint Argc, MArgume
 // 2: output the rref and its pivots
 // 3: output the rref, kernel and pivots
 EXTERN_C DLLEXPORT int sprref_rat_rref(WolframLibraryData ld, mint Argc, MArgument* Args, MArgument Res) {
-	if (Argc != 7)
+	if (Argc != 8)
 		return LIBRARY_FUNCTION_ERROR;
 	auto na_in = MArgument_getMNumericArray(Args[0]);
 	auto output_mode = MArgument_getInteger(Args[1]);
@@ -661,6 +769,7 @@ EXTERN_C DLLEXPORT int sprref_rat_rref(WolframLibraryData ld, mint Argc, MArgume
 	auto nthreads = MArgument_getInteger(Args[4]);
 	auto verbose = MArgument_getBoolean(Args[5]);
 	auto print_step = MArgument_getInteger(Args[6]);
+	auto log_to_kernel = MArgument_getBoolean(Args[7]);
 
 	numericarray_data_t type = MNumericArray_Type_Undef;
 	auto naFuns = ld->numericarrayLibraryFunctions;
@@ -681,6 +790,10 @@ EXTERN_C DLLEXPORT int sprref_rat_rref(WolframLibraryData ld, mint Argc, MArgume
 	{
 		field_t F(FIELD_QQ);
 
+		// progress lines are forwarded to the kernel while the computation runs
+		kernel_log_streambuf log_buffer(ld);
+		std::ostream log_stream(&log_buffer);
+
 		WXF_PARSER::Parser parser(in_str, length);
 		parser.parse();
 		auto mat = sparse_mat_read_wxf<rat_t, int>(parser.tokens, F);
@@ -689,8 +802,10 @@ EXTERN_C DLLEXPORT int sprref_rat_rref(WolframLibraryData ld, mint Argc, MArgume
 		opt->method = method;
 		opt->is_back_sub = is_back_sub;
 		opt->pool.reset(nthreads);
-		opt->verbose = verbose;
+		opt->verbose = verbose || log_to_kernel;
 		opt->print_step = print_step;
+		if (log_to_kernel)
+			opt->progress_out = &log_stream;
 
 		std::atomic<bool> cancel(false);
 		std::thread check_cancel([&]() {
@@ -703,6 +818,13 @@ EXTERN_C DLLEXPORT int sprref_rat_rref(WolframLibraryData ld, mint Argc, MArgume
 			});
 
 		auto pivots = sparse_mat_rref_reconstruct(mat, opt);
+		if (opt->abort) {
+			// the matrix is only partially reconstructed, so nothing below is
+			// meaningful (and evaluating it could read outside of its vectors)
+			cancel = true;
+			check_cancel.join();
+			return LIBRARY_FUNCTION_ERROR;
+		}
 		std::vector<pivot_t<int>> pivots_vec;
 		for (auto& p : pivots) {
 			pivots_vec.insert(pivots_vec.end(), p.begin(), p.end());
