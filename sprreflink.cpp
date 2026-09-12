@@ -631,6 +631,8 @@ EXTERN_C DLLEXPORT int sprref_mod_rref(WolframLibraryData ld, mint Argc, MArgume
 		std::ostream log_stream(&log_buffer);
 
 		rref_option_t opt;
+		if (method < 0 || method > 2)
+			return LIBRARY_FUNCTION_ERROR;
 		opt->method = method;
 		opt->is_back_sub = is_back_sub;
 		opt->pool.reset(nthreads);
@@ -638,6 +640,19 @@ EXTERN_C DLLEXPORT int sprref_mod_rref(WolframLibraryData ld, mint Argc, MArgume
 		opt->print_step = print_step;
 		if (log_to_kernel)
 			opt->progress_out = &log_stream;
+
+		// The kernel is read off the identity pivot block of the RREF, which only
+		// exists after the backward substitution: asking for it while disabling the
+		// backward substitution is contradictory, so enable the backward
+		// substitution instead of returning a kernel that does not annihilate the
+		// matrix.
+		if ((output_mode == 1 || output_mode == 3) && !opt->is_back_sub) {
+			std::ostream& warn = log_to_kernel ? log_stream : std::cerr;
+			warn << "Warning: the kernel requires the backward substitution, which"
+				<< " BackwardSubstitution -> False disabled; enabling the backward"
+				<< " substitution." << std::endl;
+			opt->is_back_sub = true;
+		}
 
 		std::atomic<bool> cancel(false);
 		std::thread check_cancel([&]() {
@@ -799,6 +814,8 @@ EXTERN_C DLLEXPORT int sprref_rat_rref(WolframLibraryData ld, mint Argc, MArgume
 		auto mat = sparse_mat_read_wxf<rat_t, int>(parser.tokens, F);
 
 		rref_option_t opt;
+		if (method < 0 || method > 2)
+			return LIBRARY_FUNCTION_ERROR;
 		opt->method = method;
 		opt->is_back_sub = is_back_sub;
 		opt->pool.reset(nthreads);
@@ -806,6 +823,19 @@ EXTERN_C DLLEXPORT int sprref_rat_rref(WolframLibraryData ld, mint Argc, MArgume
 		opt->print_step = print_step;
 		if (log_to_kernel)
 			opt->progress_out = &log_stream;
+
+		// The kernel is read off the identity pivot block of the RREF, which only
+		// exists after the backward substitution: asking for it while disabling the
+		// backward substitution is contradictory, so enable the backward
+		// substitution instead of returning a kernel that does not annihilate the
+		// matrix.
+		if ((output_mode == 1 || output_mode == 3) && !opt->is_back_sub) {
+			std::ostream& warn = log_to_kernel ? log_stream : std::cerr;
+			warn << "Warning: the kernel requires the backward substitution, which"
+				<< " BackwardSubstitution -> False disabled; enabling the backward"
+				<< " substitution." << std::endl;
+			opt->is_back_sub = true;
+		}
 
 		std::atomic<bool> cancel(false);
 		std::thread check_cancel([&]() {

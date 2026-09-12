@@ -99,7 +99,11 @@ int main(int argc, char** argv) {
 		.implicit_value(true)
 		.nargs(0);
 	program.add_argument("-m", "--method")
-		.help("method of RREF ")
+		.help("method of RREF:\n"
+			"0: right and left search (permuted)\n"
+			"1: only right search: the leftmost pivot columns, i.e. the standard RREF,\n"
+			"   when the column weights are the default\n"
+			"2: hybrid (permuted)")
 		.default_value(0)
 		.nargs(1)
 		.scan<'i', int>();
@@ -115,7 +119,7 @@ int main(int argc, char** argv) {
 		.nargs(1);
 	program.add_argument("-p", "--prime")
 		.default_value("34534567")
-		.help("a prime number, only vaild when field is Zp ")
+		.help("a prime number, only valid when field is Zp")
 		.nargs(1);
 	program.add_argument("-t", "--threads")
 		.help("the number of threads ")
@@ -187,10 +191,31 @@ int main(int argc, char** argv) {
 	rref_option_t opt;
 	int nthread = program.get<int>("--threads");
 	opt->method = program.get<int>("--method");
+	if (opt->method < 0 || opt->method > 2) {
+		std::cerr << "The method is not valid: " << opt->method
+			<< ". It should be 0, 1 or 2." << std::endl;
+		exit(1);
+	}
 	if (nthread == 0)
 		opt->pool.reset(); // automatic mode, use all possible threads
 	else
 		opt->pool.reset(nthread);
+
+	opt->verbose = (program["--verbose"] == true);
+	opt->is_back_sub = (program["--no-backward-substitution"] == false);
+	opt->print_step = program.get<int>("--print_step");
+
+	// The kernel is read off the identity pivot block of the RREF, which only exists
+	// once the backward substitution has been performed: asking for --kernel while
+	// disabling the backward substitution is contradictory, and the result would be a
+	// kernel that does not annihilate the matrix. Drop the option up front, before the
+	// input is even read.
+	if (program["--kernel"] == true && !opt->is_back_sub) {
+		std::cerr << "Warning: --kernel requires the backward substitution, which"
+			<< " --no-backward-substitution disabled; enabling the backward"
+			<< " substitution." << std::endl;
+		opt->is_back_sub = true;
+	}
 
 	std::thread thread_listener(key_listener, std::ref(opt->abort));
 
@@ -239,10 +264,6 @@ int main(int argc, char** argv) {
 	else {
 		printmatinfo(std::get<1>(mat));
 	}
-
-	opt->verbose = (program["--verbose"] == true);
-	opt->is_back_sub = (program["--no-backward-substitution"] == false);
-	opt->print_step = program.get<int>("--print_step");
 
 	if (opt->verbose) {
 		std::cout << "-------------------" << std::endl;

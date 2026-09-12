@@ -25,11 +25,13 @@
       3, "RREF,Kernel,Pivots": returns {rref, kernel, pivots}.
     - "Method":
       0, "RightAndLeft": right and left search (default).
-      1, "Right": only right search (chooses the leftmost independent columns as pivots).
+      1, "Right": only right search (with the default weights this chooses the leftmost
+        independent columns as pivots, i.e. the standard reduced row echelon form).
       2, "Hybrid": hybrid.
     - "BackwardSubstitution":
       True: submatrix rref[[ pivots[[All,1]], pivots[[All,2]] ]] is an identity matrix (default).
-      False: submatrix is upper triangular.
+      False: submatrix is upper triangular (a kernel is requested: the backward substitution
+        is then performed anyway, since the kernel is read off the identity submatrix).
     - "Threads": number of threads (Integer >= 0, with 0 meaning automatic).
     - "Verbose": True | False.
     - "PrintStep": Integer (print progress every n steps).
@@ -414,7 +416,6 @@ outputModeToInteger = <|
   0 -> 0,
   1 -> 1,
   2 -> 2,
-  3 -> 3,
   "RREF" -> 0,
   "RREF,Kernel" -> 1,
   "RREF,Pivots" -> 2,

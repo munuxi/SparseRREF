@@ -59,10 +59,10 @@
 
 namespace SparseRREF {
 	// version
-	static const char version[] = "v0.4.1";
+	static const char version[] = "v0.4.2";
 	static const int version_major = 0;
 	static const int version_minor = 4;
-	static const int version_patch = 1;
+	static const int version_patch = 2;
 
 	enum SPARSE_FILE_TYPE {
 		SPARSE_FILE_TYPE_PLAIN,
@@ -160,8 +160,9 @@ namespace SparseRREF {
 
 	// rref_option
 	// method 0: right and left search
-	// method 1: only right search
-	// method 2: hibrid
+	// method 1: only right search (with the default col_weight its pivot columns are the
+	//           leftmost independent ones, i.e. the standard RREF)
+	// method 2: hybrid
 	// TODO: more methods...
 	struct rref_option {
 		bool verbose = false;

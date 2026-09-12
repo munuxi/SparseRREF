@@ -1,5 +1,5 @@
 # Sparse RREF
-(exact) Sparse Reduced Row Echelon Form (RREF) **with row and column permutations** in C++
+(exact) Sparse Reduced Row Echelon Form (RREF) in C++
 
 ---
 
@@ -7,9 +7,9 @@
 
 ----
 
-This header-only library intends to compute the exact RREF with row and column permutations of a sparse matrix over finite field or rational field, which is a common problem in linear algebra, and is widely used for number theory, cryptography, theoretical physics, etc.. The code is based on the FLINT library, which is a C library for number theory. 
+This header-only library computes the exact RREF of a sparse matrix over a finite field or the rational field, a problem that is common in linear algebra and widely used in number theory, cryptography, theoretical physics, etc. The code is based on the FLINT library, which is a C library for number theory. 
 
-Some algorithms are inspired by [Spasm](https://github.com/cbouilla/spasm), but we do not depend on it. The algorithm here is definite (Spasm is random), so once the parameters are given, the result is stable, which is important for some purposes. 
+Some algorithms are inspired by [Spasm](https://github.com/cbouilla/spasm), but we do not depend on it. The algorithm here is deterministic (Spasm is random), so once the parameters are given, the result is stable, which is important for some purposes.
 
 ### License
 
@@ -17,17 +17,19 @@ Some algorithms are inspired by [Spasm](https://github.com/cbouilla/spasm), but 
 
 ### Dependence
 
-The code mainly depends on [FLINT](https://flintlib.org/) to support arithmetic, and [BS::thread_pool](https://github.com/bshoshany/thread-pool),  [wxf_parser](https://github.com/munuxi/wxf_parser) and [argparse](https://github.com/p-ranav/argparse) (they are included) are also used to support thread pool, WXF format and parse args.
+The code mainly depends on [FLINT](https://flintlib.org/) to support arithmetic, and [BS::thread_pool](https://github.com/bshoshany/thread-pool), [wxf_parser](https://github.com/munuxi/wxf_parser) and [argparse](https://github.com/p-ranav/argparse) (they are included) are also used, for the thread pool, the WXF format and argument parsing.
 
-If one use functions on sparse_tensor, it also requires to link tbb (Threading Building Blocks) library (for GCC and CLANG), since the Parallel STL of C++20 is used there.
+Using the `sparse_tensor` functions also requires linking the tbb (Threading Building Blocks) library (for GCC and Clang), since the parallel STL of C++20 is used there.
 
 ### What to compute?
 
-For a sparse matrix $M$, the code computes its RREF $\Lambda$ with row and column permutations. Instead of permute the row and column directly, we keep the row and column ordering of the matrix, i.e. the i-th row/column of $\Lambda$ is the i-th row/column of $M$, and the row and column permutation of this RREF is implicitly given by its pivots, which is a list of pairs of (row,col). In the ordering of pivots, the submatrix $\Lambda[\text{rows in pivots},\text{cols in pivots}]$ of $\Lambda$ is an identity matrix (if `--no-backward-substitution` is enabled, it is upper triangular). 
+For a sparse matrix $M$, the code computes its RREF $\Lambda$ with row and column permutations by default (`--method 0`). In practice, this is the most efficient way to solve a linear system or to obtain the kernel. Instead of permuting the rows and columns explicitly, we keep the row and column ordering of the matrix, i.e. the i-th row/column of $\Lambda$ is the i-th row/column of $M$, and the permutation is given implicitly by the pivots, which are a list of pairs (row, col). In the ordering of pivots, the submatrix $\Lambda[\text{rows in pivots},\text{cols in pivots}]$ of $\Lambda$ is an identity matrix (if `--no-backward-substitution` is enabled, it is upper triangular). 
+
+The pivot columns are those the search heuristic happens to pick, so with `--method 0` and `--method 2` they are *some* basis of the column space, and the result is a RREF up to a row **and column** permutation. With `--method 1`, and the default column weights, the pivot columns are instead the **leftmost** independent ones, i.e. a column is a pivot column exactly if it is not a linear combination of the columns to its left. That is the standard (textbook) RREF; since the row ordering is still kept, the matrix is the standard RREF up to a row permutation, which the pivots list gives explicitly.
 
 ### How to compile the code
 
-We now only support the rational field $\mathbb Q$ and the $\mathbb Z/p\mathbb Z$, where $p$ is a prime less than $2^{\texttt{BIT}-1}$ (it's $2^{63}$ on a 64-bit machine), but it is possible to generalize to other fields/rings by some small modification.
+We now only support the rational field $\mathbb Q$ and the field $\mathbb Z/p\mathbb Z$, where $p$ is a prime less than $2^{\texttt{BIT}-1}$ (it's $2^{63}$ on a 64-bit machine), but it is possible to generalize to other fields/rings by some small modification.
 
 It is recommended to use [mimalloc](https://github.com/microsoft/mimalloc) (or other similar library) to dynamically override the standard malloc, especially on Windows.
 
@@ -35,7 +37,7 @@ Example build commands (also add `-lpthread` if pthread is required by the compi
 
 Standalone executable:
 ```bash
-g++ main.cpp -o sparserref -O3 -std=c++20 -I$INCULDE -L$LIB -lflint -lgmp
+g++ main.cpp -o sparserref -O3 -std=c++20 -I$INCLUDE -L$LIB -lflint -lgmp
 ```
 
 Shared library for [Wolfram LibraryLink](https://reference.wolfram.com/language/guide/LibraryLink.html) API (used by Mathematica package [SparseRREF.wl](SparseRREF.wl), see below):
@@ -49,7 +51,7 @@ and `$MATHEMATICA_HOME/SystemFiles/IncludeFiles/C` is the path of Mathematica C 
 
 #### Standalone executable
 
-The file [main.cpp](main.cpp) is an example to use the header-only library, the help is
+The file [main.cpp](main.cpp) is an example of how to use the header-only library; its help is
 
 ```
 Usage: SparseRREF [--help] [--version] [--output VAR]
@@ -59,7 +61,7 @@ Usage: SparseRREF [--help] [--version] [--output VAR]
                   [--no-backward-substitution]
                   input_file
 
-(exact) Sparse Reduced Row Echelon Form v0.4.0
+(exact) Sparse Reduced Row Echelon Form v0.4.2
 
 Positional arguments:
   input_file                       input file in the Matrix Market exchange formats (MTX) or
@@ -70,11 +72,15 @@ Optional arguments:
   -v, --version                    prints version information and exits
   -o, --output                     output file in MTX format [default: "<input_file>.rref"]
   -k, --kernel                     output the kernel (null vectors)
-  -m, --method                     method of RREF  [default: 0]
+  -m, --method                     method of RREF:
+                                   0: right and left search (permuted)
+                                   1: only right search: the leftmost pivot columns, i.e. the standard RREF,
+                                      when the column weights are the default
+                                   2: hybrid (permuted) [default: 0]
   -op, --output-pivots             output pivots
   -F, --field                      QQ: rational field
                                    Zp or Fp: Z/p for a prime p [default: "QQ"]
-  -p, --prime                      a prime number, only vaild when field is Zp  [default: "34534567"]
+  -p, --prime                      a prime number, only valid when field is Zp [default: "34534567"]
   -t, --threads                    the number of threads  [default: 1]
   -V, --verbose                    prints information of calculation
   -ps, --print_step                print step when --verbose is enabled [default: 100]
@@ -83,9 +89,9 @@ Optional arguments:
 
 With `--verbose`, progress lines are rewritten in place when the output is a terminal and
 printed one line per sample (newline-terminated, no carriage returns) when it is redirected
-or piped, so `sprref -V ... > log.txt` yields a clean, parseable log.
+or piped, so `sparserref -V ... > log.txt` yields a clean, parseable log.
 
-The format (matrix market-like format) of input file looks like this:
+The input file format (Matrix Market-like) looks like this:
 ```
 % some comments
 number_of_rows number_of_columns number_of_non_zero_values
@@ -103,15 +109,15 @@ row_index_1 column_index_1 value_1
 row_index_2 column_index_2 value_2
 ...
 row_index_n column_index_n value_n
-0 0 0 
+0 0 0
 ```
 The last line is a dummy line, which is used to indicate the end of the matrix.
 
-The main function is `sparse_mat_rref`, its output is its pivots, and it modifies the input matrix $M$ to its RREF $\Lambda$.
+The main function is `sparse_mat_rref`; its output is its pivots, and it reduces the input matrix $M$ in place to its RREF $\Lambda$.
 
 #### Mathematica API
 
-The Mathematica package [SparseRREF.wl](SparseRREF.wl) allows to call functions exported in [sprreflink.cpp](sprreflink.cpp):
+The Mathematica package [SparseRREF.wl](SparseRREF.wl) allows calling the functions exported in [sprreflink.cpp](sprreflink.cpp):
 
 Example usage:
 ```mathematica
@@ -139,6 +145,9 @@ SparseRREFLog[] (* every line, not only the last one shown in the cell *)
 mat = SparseArray @ { {10, 0, 20}, {30, 40, 50} };
 p = 7;
 {rref, kernel} = SparseRREF[mat, Modulus -> p, "OutputMode" -> "RREF,Kernel", "Method" -> "Hybrid", "Threads" -> 0];
+
+(* the standard RREF: with the default weights the right search takes the leftmost columns *)
+rref = SparseRREF[mat, Modulus -> p, "Method" -> "Right"];
 ```
 
 To use this package, you have to compile [sprreflink.cpp](sprreflink.cpp) to a shared library (`sprreflink.dll` on Windows, `sprreflink.so` on Linux, `sprreflink.dylib` on macOS) in the same directory with [SparseRREF.wl](SparseRREF.wl).
@@ -150,7 +159,7 @@ See comments in [SparseRREF.wl](SparseRREF.wl) for more details.
 We compare it with [Spasm](https://github.com/cbouilla/spasm). Platform and Configuration: 
 
 	CPU: Intel(R) Core(TM) Ultra 9 185H (6P+8E+2LPE)
-	MEM: 24.5G + SWAP on PCIE4.0 SSD 
+	MEM: 24.5G + SWAP on PCIE4.0 SSD
 	OS: Arch Linux x86-64
 	Compiler: gcc (GCC) 15.2.1 20250813 with mimalloc
 	FLINT: v3.1.2
@@ -160,7 +169,7 @@ We compare it with [Spasm](https://github.com/cbouilla/spasm). Platform and Conf
 	  - Spasm: Default configuration for Spasm, first spasm_echelonize and then spasm_rref
 	  - SparseRREF: -V -t 16 -F Zp -p 1073741827
 
-First two test matrices come from https://hpac.imag.fr, bs comes from symbol bootstrap, ibp comes from IBP of Feynman integrals:
+The first two test matrices come from https://hpac.imag.fr; bs comes from symbolic bootstrap, and ibp comes from IBPs of Feynman integrals:
 
 | Matrix   | (#row, #col, #non-zero-values, rank)   | Spasm (echelonize + rref)    | SparseRREF |
 | -------- | -------------------------------------- | ---------------------------- | ---------- |
@@ -172,8 +181,8 @@ First two test matrices come from https://hpac.imag.fr, bs comes from symbol boo
 | ibp-1    | (69153, 73316, 1117324, 58252)         | (rank is wrong) 2543.92s + ? | 2.96s      |
 | ibp-2    | (169323, 161970, 2801475, 135009)      | too slow                     | 15.27s     |
 
-Some tests for Spasm are slow since the physical memory is not enough, and it uses swap. In the most of cases,
-SparseRREF uses less memory than Spasm since its result has less non zero values.
+Some Spasm runs are slow because there is not enough physical memory and it starts swapping. In most cases
+SparseRREF uses less memory than Spasm, since its result has fewer nonzero values.
 
 ### TODO
 
@@ -181,7 +190,7 @@ SparseRREF uses less memory than Spasm since its result has less non zero values
 * Improve the algorithms.
 * Add PLUQ decomposition.
 * Add more fields/rings.
-* Add more functions and parameters to Mathematica API
+* Add more functions and parameters to Mathematica API.
 
 ### Citing
 
