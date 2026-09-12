@@ -158,12 +158,12 @@ See comments in [SparseRREF.wl](SparseRREF.wl) for more details.
 
 We compare it with [Spasm](https://github.com/cbouilla/spasm). Platform and Configuration: 
 
-	CPU: Intel(R) Core(TM) Ultra 9 185H (6P+8E+2LPE)
-	MEM: 24.5G + SWAP on PCIE4.0 SSD
+	CPU: AMD Ryzen 9 9950X
+	MEM: 32G + SWAP on PCIE5.0 SSD
 	OS: Arch Linux x86-64
-	Compiler: gcc (GCC) 15.2.1 20250813 with mimalloc
-	FLINT: v3.1.2
-	SparseRREF: v0.3.4
+	Compiler: gcc version 16.2.1 20260810 (GCC)
+	FLINT: v3.6.0
+	SparseRREF: v0.4.2
 	Prime number: 1073741827 ~ 2^30
 	Configuration: 
 	  - Spasm: Default configuration for Spasm, first spasm_echelonize and then spasm_rref
@@ -173,13 +173,13 @@ The first two test matrices come from https://hpac.imag.fr; bs comes from symbol
 
 | Matrix   | (#row, #col, #non-zero-values, rank)   | Spasm (echelonize + rref)    | SparseRREF |
 | -------- | -------------------------------------- | ---------------------------- | ---------- |
-| GL7d24   | (21074, 105054, 593892, 18549)         | 20.8001s + 38.2s             | 2.93s      |
-| M0,6-D10 | (1274688, 616320, 5342400, 493432)     | 49.9s + 19.3s                | 49.39s     |
-| bs-1     | (202552, 64350, 11690309, 62130)       | 4.19241s + 1.1s              | 0.68s      |
-| bs-2     | (709620, 732600, 48819232, 709620)     | too slow                     | 149.68s    |
-| bs-3     | (10011551, 2958306, 33896262, 2867955) | 484s + 327.1s                | 34.00s     |
-| ibp-1    | (69153, 73316, 1117324, 58252)         | (rank is wrong) 2543.92s + ? | 2.96s      |
-| ibp-2    | (169323, 161970, 2801475, 135009)      | too slow                     | 15.27s     |
+| GL7d24   | (21074, 105054, 593892, 18549)         | 8.5s + 28.0s                 | 1.67s      |
+| M0,6-D10 | (1274688, 616320, 5342400, 493432)     | 42.8s + 5.4s                 | 34.39s     |
+| bs-1     | (202552, 64350, 11690309, 62130)       | 2.9s + 0.6s                  | 0.40s      |
+| bs-2     | (709620, 732600, 48819232, 709620)     | too slow                     | 82.24s     |
+| bs-3     | (10011551, 2958306, 33896262, 2867955) | 312s + 182.4s                | 17.22s     |
+| ibp-1    | (69153, 73316, 1117324, 58252)         | too slow                     | 1.90s      |
+| ibp-2    | (169323, 161970, 2801475, 135009)      | too slow                     | 10.60s     |
 
 Some Spasm runs are slow because there is not enough physical memory and it starts swapping. In most cases
 SparseRREF uses less memory than Spasm, since its result has fewer nonzero values.
