@@ -965,7 +965,7 @@ namespace SparseRREF {
 					continue;
 				}
 				auto now = SparseRREF::clocknow();
-				now_nnz = mat.nnz();
+				// now_nnz is the count at the level entry: the Schur tasks are resizing rows
 				progress(opt, "Row")
 					.add("%*zu/%zu", bitlen_nrow, (size_t)done, rank)
 					.add("  nnz: %*zu", bitlen_nnz, now_nnz)
@@ -1246,6 +1246,7 @@ namespace SparseRREF {
 			// TODO: check mode
 			std::atomic<size_t> cc = 0;
 			size_t old_cc = cc.load(std::memory_order_relaxed);
+			size_t now_nnz = mat.nnz(); // read at the barrier, before the tasks resize rows
 			pool.detach_blocks<size_t>(0, leftrows.size(), [&](const size_t s, const size_t e) {
 				auto id = SparseRREF::thread_id();
 				schur_helper<T, index_t> helper(g_helper, id);
@@ -1267,11 +1268,9 @@ namespace SparseRREF {
 					}
 					const size_t cur_cc = cc.load(std::memory_order_relaxed);
 					if (cur_cc - old_cc > printstep) {
-						auto now_nnz = mat.nnz();
 						progress(opt, "Row")
 							.add("%*zu/%zu", bitlen_nrow, (size_t)std::floor(rank + (cur_cc * 1.0 / leftrows.size()) * used_pivots.size()), total_rank)
 							.add("  nnz: %*zu", bitlen_nnz, now_nnz)
-							.add("  alloc: %zu", mat.alloc())
 							.add("  speed: %g row/s", rate_per_second((((cur_cc - old_cc) * 1.0 / leftrows.size()) * used_pivots.size()), usedtime(cn, clocknow())))
 							.add("          ");
 						old_cc = cur_cc;
@@ -1306,14 +1305,15 @@ namespace SparseRREF {
 		auto nthreads = pool.get_thread_count();
 
 		pool.detach_loop(0, mat.nrow, [&](auto i) { mat[i].compress(); });
+		// nnz() and alloc() sum over the rows, so they may only be read once no task is
+		// resizing rows; the progress lines below print the value captured at the last barrier
+		pool.wait();
 
 		// store the pivots that have been used
 		// sv is not used
 		std::vector<index_t> rowpivs(mat.nrow, sv);
 		std::vector<std::vector<pivot_t<index_t>>> pivots;
 		std::vector<pivot_t<index_t>> n_pivots;
-
-		pool.wait();
 
 		size_t now_nnz = mat.nnz();
 		double density = (double)now_nnz / (mat.nrow * mat.ncol);
@@ -1448,13 +1448,11 @@ namespace SparseRREF {
 				// require real progress, otherwise a round-entry report would show speed 0
 				if (opt->verbose && pr > oldpr && (print_once || pr - oldpr > opt->print_step)) {
 					auto end = clocknow();
-					now_nnz = mat.nnz();
-					auto now_alloc = mat.alloc();
+					// now_nnz is the count at the last barrier: the Schur tasks are resizing rows
 					progress(opt, "Col")
 						.add("%*zu/%zu", bitlen_ncol, (size_t)pr, mat.ncol)
 						.add("  rank: %*zu", bitlen_ncol, kk + ps.size())
 						.add("  nnz: %*zu", bitlen_nnz, now_nnz)
-						.add("  alloc: %*zu", bitlen_nnz, now_alloc)
 						.add("  density: %8.6g%%", density_percent(now_nnz, mat.nrow, mat.ncol))
 						.add("  speed: %8.6g col/s", rate_per_second(pr - oldpr, usedtime(start, end)))
 						.add("    ");
@@ -1604,6 +1602,7 @@ namespace SparseRREF {
 			}
 
 			rank += n_pivots.size();
+			now_nnz = mat.nnz(); // after the barrier of this round
 		}
 
 		if (opt->verbose)
