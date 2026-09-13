@@ -1651,6 +1651,31 @@ namespace SparseRREF {
 	// where H is the height of a matrix (the maximal height of each entry), 
 	// E is the reconstracted rref matrix
 	// d is an integer such that d*E is a integer matrix
+	// The smallest prime >= p that divides no numerator and no denominator of mat. A prime
+	// dividing a denominator has no modular image of that entry at all (FLINT aborts with
+	// "impossible inverse"), and a prime dividing a numerator zeroes an entry, which changes
+	// the pivot structure the reconstruction relies on. Explicit zero entries are skipped.
+	template <typename index_t>
+	ulong next_admissible_prime(const sparse_mat<rat_t, index_t>& mat, ulong p) {
+		p = n_nextprime(p - 1, 0);
+		while (true) {
+			bool ok = true;
+			for (size_t i = 0; i < mat.nrow && ok; i++)
+				for (size_t j = 0; j < mat[i].nnz(); j++) {
+					const fmpq* q = mat[i][j].data();
+					if (fmpz_is_zero(fmpq_numref(q)))
+						continue;
+					if (fmpz_fdiv_ui(fmpq_numref(q), p) == 0 || fmpz_fdiv_ui(fmpq_denref(q), p) == 0) {
+						ok = false;
+						break;
+					}
+				}
+			if (ok)
+				return p;
+			p = n_nextprime(p, 0);
+		}
+	}
+
 	// checkrank is only used for sparse_mat_inverse
 	template <typename index_t>
 	std::vector<std::vector<pivot_t<index_t>>> sparse_mat_rref_reconstruct(
@@ -1664,7 +1689,7 @@ namespace SparseRREF {
 		pool.detach_loop(0, mat.nrow, [&](auto i) { mat[i].compress(); });
 		pool.wait();
 
-		ulong prime = n_nextprime(1ULL << 60, 0);
+		ulong prime = next_admissible_prime(mat, 1ULL << 60);
 		field_t F(FIELD_Fp, prime);
 
 		sparse_mat<ulong, index_t> matul(mat.nrow, mat.ncol);
@@ -1759,7 +1784,7 @@ namespace SparseRREF {
 
 		while (!isok && !opt->abort) {
 			isok = true;
-			prime = n_nextprime(prime, 0);
+			prime = next_admissible_prime(mat, prime + 1);
 			auto ce = clocknow();
 			
 			if (verbose) {
