@@ -19,7 +19,15 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+// Parallel STL is optional: Apple's libc++ has no <execution> policies and GCC needs TBB for
+// them. Define SPARSERREF_USE_PSTL to sort with std::execution::par; otherwise the sorts run
+// sequentially (they are not on the hot path of the elimination).
+#if defined(SPARSERREF_USE_PSTL)
 #include <execution>
+#define SPARSERREF_PAR_POLICY std::execution::par,
+#else
+#define SPARSERREF_PAR_POLICY
+#endif
 #include <filesystem>
 #include <fstream>
 #include <iomanip>

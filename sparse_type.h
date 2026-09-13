@@ -1476,7 +1476,7 @@ namespace SparseRREF {
 				// if not sorted, we need to permute the entries
 				if (!check_sorted()) {
 					std::vector<size_t> perm = perm_init(res_nnz);
-					std::sort(std::execution::par, perm.begin(), perm.end(), [&](size_t a, size_t b) {
+					std::sort(SPARSERREF_PAR_POLICY perm.begin(), perm.end(), [&](size_t a, size_t b) {
 						auto ptra = colptr + (rowptr[index] + a) * (rank - 1);
 						auto ptrb = colptr + (rowptr[index] + b) * (rank - 1);
 						return lexico_compare(ptra, ptrb, rank - 1) < 0;
@@ -1506,7 +1506,7 @@ namespace SparseRREF {
 				}
 				else {
 					std::vector<size_t> perm = perm_init(res_nnz);
-					std::sort(std::execution::par, perm.begin(), perm.end(), [&](size_t a, size_t b) {
+					std::sort(SPARSERREF_PAR_POLICY perm.begin(), perm.end(), [&](size_t a, size_t b) {
 						auto ptra = colptr + (rowptr[index] + a) * (rank - 1);
 						auto ptrb = colptr + (rowptr[index] + b) * (rank - 1);
 						return lexico_compare(ptra, ptrb, rank - 1) < 0;
@@ -1761,7 +1761,7 @@ namespace SparseRREF {
 				std::vector<size_t> perm;
 				if constexpr (!Sorted && !RowspecIsSpan) {
 					perm = perm_init(rowptr[rowspec_idx + 1] - rowptr[rowspec_idx]);
-					std::sort(std::execution::par, perm.begin(), perm.end(), [&](size_t a, size_t b) {
+					std::sort(SPARSERREF_PAR_POLICY perm.begin(), perm.end(), [&](size_t a, size_t b) {
 						auto ptra = colptr + (rowptr[rowspec_idx] + a) * (rank - 1);
 						auto ptrb = colptr + (rowptr[rowspec_idx] + b) * (rank - 1);
 						return lexico_compare(ptra, ptrb, rank - 1) < 0;
@@ -1932,7 +1932,7 @@ namespace SparseRREF {
 				if (rownnz < 2)
 					continue;
 				std::vector<size_t> perm = perm_init(rownnz);
-				if (std::adjacent_find(std::execution::par, perm.begin(), perm.end(), [&](size_t a, size_t b) {
+				if (std::adjacent_find(SPARSERREF_PAR_POLICY perm.begin(), perm.end(), [&](size_t a, size_t b) {
 					auto ptra = colptr + (rowptr[i] + a) * (rank - 1);
 					auto ptrb = colptr + (rowptr[i] + b) * (rank - 1);
 					return lexico_compare(ptra, ptrb, rank - 1) > 0;
@@ -1951,7 +1951,7 @@ namespace SparseRREF {
 					std::vector<size_t> perm(rownnz);
 					for (size_t j = 0; j < rownnz; j++)
 						perm[j] = j;
-					std::sort(std::execution::par, perm.begin(), perm.end(), [&](size_t a, size_t b) {
+					std::sort(SPARSERREF_PAR_POLICY perm.begin(), perm.end(), [&](size_t a, size_t b) {
 						auto ptra = colptr + (rowptr[i] + a) * (rank - 1);
 						auto ptrb = colptr + (rowptr[i] + b) * (rank - 1);
 						return lexico_compare(ptra, ptrb, rank - 1) < 0;
@@ -1974,7 +1974,7 @@ namespace SparseRREF {
 				std::vector<size_t> perm(rownnz);
 				for (size_t j = 0; j < rownnz; j++)
 					perm[j] = j;
-				std::sort(std::execution::par, perm.begin(), perm.end(), [&](size_t a, size_t b) {
+				std::sort(SPARSERREF_PAR_POLICY perm.begin(), perm.end(), [&](size_t a, size_t b) {
 					auto ptra = colptr + (rowptr[i] + a) * (rank - 1);
 					auto ptrb = colptr + (rowptr[i] + b) * (rank - 1);
 					return lexico_compare(ptra, ptrb, rank - 1) < 0;
@@ -2133,7 +2133,7 @@ namespace SparseRREF {
 			}
 			if (!l_sorted) {
 				std::vector<size_t> perm = perm_init(nnz);
-				std::sort(std::execution::par, perm.begin(), perm.end(), [&](size_t a, size_t b) {
+				std::sort(SPARSERREF_PAR_POLICY perm.begin(), perm.end(), [&](size_t a, size_t b) {
 					auto ptra = l.data.colptr + a * newrank;
 					auto ptrb = l.data.colptr + b * newrank;
 					return lexico_compare(ptra, ptrb, newrank) < 0;
@@ -2604,11 +2604,11 @@ namespace SparseRREF {
 				// the comparisons for a tensor that holds few entries
 				if (nz >= par_threshold) {
 					if (order == nullptr)
-						std::sort(std::execution::par, perm.begin(), perm.end(), [&](size_t a, size_t b) {
+						std::sort(SPARSERREF_PAR_POLICY perm.begin(), perm.end(), [&](size_t a, size_t b) {
 							return lexico_compare(index(a), index(b), r) < 0;
 							});
 					else
-						std::sort(std::execution::par, perm.begin(), perm.end(), [&](size_t a, size_t b) {
+						std::sort(SPARSERREF_PAR_POLICY perm.begin(), perm.end(), [&](size_t a, size_t b) {
 							return lexico_compare(index(a), index(b), *order) < 0;
 							});
 					return perm;
@@ -2643,7 +2643,7 @@ namespace SparseRREF {
 						for (size_t i = 0; i < nz; i++)
 							label[i] = index(perm[i])[pos];
 					else
-						std::transform(std::execution::par, perm.begin(), perm.end(), label.begin(),
+						std::transform(SPARSERREF_PAR_POLICY perm.begin(), perm.end(), label.begin(),
 							[&](const size_t p) { return index(p)[pos]; });
 
 					for (size_t i = 0; i < nz; i++) {

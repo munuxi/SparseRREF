@@ -986,7 +986,7 @@ namespace SparseRREF {
 		// faster and a call without a pool (pool == nullptr) stays single threaded
 		constexpr size_t par_sort_threshold = 1u << 16;
 		if (pool != nullptr && equal_ind_list.size() >= par_sort_threshold)
-			std::sort(std::execution::par, perm.begin(), perm.end(), by_index);
+			std::sort(SPARSERREF_PAR_POLICY perm.begin(), perm.end(), by_index);
 		else
 			std::sort(perm.begin(), perm.end(), by_index);
 
