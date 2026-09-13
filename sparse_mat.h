@@ -367,6 +367,11 @@ namespace SparseRREF {
 			size_t index = i;
 			if (ordering < 0)
 				index = pivots.size() - 1 - i;
+			if (opt->abort) {
+				pool.purge();
+				pool.wait();
+				return;
+			}
 			auto [row, col] = pivots[index];
 			thecol.clear();
 			for (size_t j = 0; j < tranmat[col].nnz(); j++) {
@@ -950,6 +955,8 @@ namespace SparseRREF {
 			auto id = SparseRREF::thread_id();
 			schur_helper<T, index_t> helper(g_helper, id);
 			for (size_t i = s; i < e; i++) {
+				if (opt->abort)
+					return;
 				schur_complete_func(mat, leftrows[i], sub_pivots, F, helper);
 				cc++;
 			}
@@ -957,6 +964,8 @@ namespace SparseRREF {
 
 		if (verbose) {
 			while (cc.load(std::memory_order_relaxed) < leftrows.size()) {
+				if (opt->abort)
+					break; // the wait below drains the pool
 				double status = 1.0 * sub_pivots.size() * cc.load(std::memory_order_relaxed) / leftrows.size();
 				double done = (double)process + status;
 				if (done - tprogress.last_count <= (double)printstep) {
@@ -979,6 +988,10 @@ namespace SparseRREF {
 		}
 
 		pool.wait();
+		if (opt->abort) {
+			opt->verbose = verbose;
+			return;
+		}
 
 		triangular_solver(mat, tranmat, sub_pivots, F, opt, -1);
 		opt->verbose = verbose;
@@ -1263,7 +1276,9 @@ namespace SparseRREF {
 				const size_t printstep = opt->print_step > 0 ? (size_t)opt->print_step : 1;
 				while (cc.load(std::memory_order_relaxed) < leftrows.size()) {
 					if (opt->abort || opt->bad_prime) {
+						// the running tasks capture this frame's locals: wait for them
 						pool.purge();
+						pool.wait();
 						return;
 					}
 					const size_t cur_cc = cc.load(std::memory_order_relaxed);
@@ -1494,6 +1509,7 @@ namespace SparseRREF {
 				while (done_count.load(std::memory_order_relaxed) < leftrows.size()) {
 					if (opt->abort) {
 						pool.purge();
+						pool.wait(); // the running tasks capture this frame's locals
 						return pivots;
 					}
 
@@ -1584,6 +1600,7 @@ namespace SparseRREF {
 
 					if (opt->abort) {
 						pool.purge();
+						pool.wait(); // the running tasks capture this frame's locals
 						return pivots;
 					}
 
@@ -2007,6 +2024,7 @@ namespace SparseRREF {
 	// 1 - matrix is not square
 	// 2 - matrix is not invertible
 	// 3 - Field is not supported
+	// 4 - aborted (opt->abort was set; the matrix is only partially reduced)
 	template <typename T, typename index_t>
 	int sparse_mat_inverse(sparse_mat<T, index_t>& M1, const sparse_mat<T, index_t>& M,
 		const field_t& F, rref_option_t opt) noexcept {
@@ -2068,6 +2086,14 @@ namespace SparseRREF {
 			opt->col_weight = old_col_weight;
 			opt->is_back_sub = is_back_sub;
 			return 3;
+		}
+
+		if (opt->abort) {
+			// the elimination or the back substitution stopped early: the pivot submatrix is
+			// not diagonal, so the extraction below would read garbage
+			opt->col_weight = old_col_weight;
+			opt->is_back_sub = is_back_sub;
+			return 4;
 		}
 
 		std::vector<pivot_t<index_t>> flatten_pivots;

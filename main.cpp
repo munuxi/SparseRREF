@@ -285,6 +285,12 @@ int main(int argc, char** argv) {
 	else {
 		pivots = sparse_mat_rref(std::get<1>(mat), F, opt);
 	}
+	if (opt->abort) {
+		// Ctrl+Q: the matrix is only partially reduced, nothing below would be meaningful
+		std::cerr << "Aborted: no result written" << std::endl;
+		thread_listener.join();
+		return 1;
+	}
 
 	end = SparseRREF::clocknow();
 	std::cout << "-------------------" << std::endl;
