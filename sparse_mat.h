@@ -1099,7 +1099,13 @@ namespace SparseRREF {
 			// rescale the pivots
 			pool.detach_loop(0, pivs.size(), [&](size_t j) {
 				auto [r, c] = pivs[j];
-				T scalar = scalar_inv(*mat.find(r, c), F);
+				T* pv = mat.find(r, c);
+				if (pv == nullptr || *pv == 0) {
+					// the pivot found modulo the first prime vanished modulo this one
+					opt->bad_prime = true;
+					return;
+				}
+				T scalar = scalar_inv(*pv, F);
 				sparse_vec_rescale(mat[r], scalar, F);
 				mat[r].reserve(mat[r].nnz());
 				});
@@ -1107,6 +1113,8 @@ namespace SparseRREF {
 			// remove the used rows
 			leftrows.resize(leftrows.size() - pivs.size());
 			pool.wait();
+			if (opt->bad_prime)
+				return combined_pivots;
 
 			// upper solver
 			pool.detach_blocks<size_t>(0, leftrows.size(), [&](const size_t s, const size_t e) {
@@ -1114,7 +1122,7 @@ namespace SparseRREF {
 				schur_helper<T, index_t> helper(g_helper, id);
 				for (size_t j = s; j < e; j++) {
 					schur_complete_func(mat, leftrows[j], pivs, F, helper);
-					if (opt->abort)
+					if (opt->abort || opt->bad_prime)
 						return;
 				}
 				}, ((leftrows.size() < 20 * nthreads) ? 0 : leftrows.size() / 10));
@@ -1207,6 +1215,8 @@ namespace SparseRREF {
 					}	
 				}
 				used_pivots = sparse_mat_direct_rref_part(mat, sub_pivots, F, opt, g_helper);
+				if (opt->bad_prime)
+					return;
 			}
 
 			if (used_pivots.size() == 0) {
@@ -1214,11 +1224,18 @@ namespace SparseRREF {
 				// rescale the pivots
 				pool.detach_loop(0, used_pivots.size(), [&](size_t j) {
 					auto [r, c] = used_pivots[j];
-					T scalar = scalar_inv(*mat.find(r, c), F);
+					T* pv = mat.find(r, c);
+					if (pv == nullptr || *pv == 0) {
+						opt->bad_prime = true;
+						return;
+					}
+					T scalar = scalar_inv(*pv, F);
 					sparse_vec_rescale(mat[r], scalar, F);
 					mat[r].reserve(mat[r].nnz());
 					});
 				pool.wait();
+				if (opt->bad_prime)
+					return;
 			}
 
 			leftrows.resize(leftrows.size() - used_pivots.size());
@@ -1235,7 +1252,7 @@ namespace SparseRREF {
 				for (size_t j = s; j < e; j++) {
 					schur_complete_func(mat, leftrows[j], used_pivots, F, helper);
 					cc++;
-					if (opt->abort)
+					if (opt->abort || opt->bad_prime)
 						return;
 				}
 				}, ((leftrows.size() < 20 * nthreads) ? 0 : leftrows.size() / 10));
@@ -1244,7 +1261,7 @@ namespace SparseRREF {
 				auto cn = clocknow();
 				const size_t printstep = opt->print_step > 0 ? (size_t)opt->print_step : 1;
 				while (cc.load(std::memory_order_relaxed) < leftrows.size()) {
-					if (opt->abort) {
+					if (opt->abort || opt->bad_prime) {
 						pool.purge();
 						return;
 					}
@@ -1265,6 +1282,8 @@ namespace SparseRREF {
 				}
 			}
 			pool.wait();
+			if (opt->bad_prime)
+				return;
 			rank += used_pivots.size();
 		}
 		if (opt->verbose) {
@@ -1677,19 +1696,24 @@ namespace SparseRREF {
 	}
 
 	// checkrank is only used for sparse_mat_inverse
+	// One attempt: elimination modulo start_prime (0: the default 2^60) and the following
+	// admissible primes. On a bad prime or a support change it returns with opt->recon_status
+	// set and mat untouched; sparse_mat_rref_reconstruct below restarts it.
 	template <typename index_t>
-	std::vector<std::vector<pivot_t<index_t>>> sparse_mat_rref_reconstruct(
-		sparse_mat<rat_t, index_t>& mat, rref_option_t opt, const bool checkrank = false) {
-
-		constexpr index_t sv = index_sval<index_t>();
+	std::vector<std::vector<pivot_t<index_t>>> sparse_mat_rref_reconstruct_attempt(
+		sparse_mat<rat_t, index_t>& mat, rref_option_t opt, const bool checkrank,
+		ulong start_prime, sparse_mat<rat_t, index_t>* result_out) {
 
 		auto& pool = opt->pool;
 		auto nthreads = pool.get_thread_count();
+		opt->recon_status = 0;
+		opt->bad_prime = false;
+		opt->bad_prime_value = 0;
 
 		pool.detach_loop(0, mat.nrow, [&](auto i) { mat[i].compress(); });
 		pool.wait();
 
-		ulong prime = next_admissible_prime(mat, 1ULL << 60);
+		ulong prime = next_admissible_prime(mat, start_prime ? start_prime : (1ULL << 60));
 		field_t F(FIELD_Fp, prime);
 
 		sparse_mat<ulong, index_t> matul(mat.nrow, mat.ncol);
@@ -1770,17 +1794,13 @@ namespace SparseRREF {
 		if (opt->abort)
 			return pivots;
 
-		// set rows not in pivots to zero
-		if (!isok) {
-			std::vector<index_t> rowset(mat.nrow, sv);
-			for (auto p : pivots)
-				for (auto [r, c] : p)
-					rowset[r] = c;
-			for (size_t i = 0; i < mat.nrow; i++)
-				if (rowset[i] == sv) {
-					mat[i].clear();
-				}
-		}
+		// the input rows are kept as they are (a restart needs them); the rows outside the
+		// pivots are dependent, so their image is zero after the first elimination and the
+		// replay gives them an empty modular image instead of reducing them again
+		std::vector<char> is_pivot_row(mat.nrow, 0);
+		for (auto& p : pivots)
+			for (auto [r, c] : p)
+				is_pivot_row[r] = 1;
 
 		while (!isok && !opt->abort) {
 			isok = true;
@@ -1795,7 +1815,10 @@ namespace SparseRREF {
 			int_t mod1 = mod * prime;
 			F = field_t(FIELD_Fp, prime);
 			pool.detach_loop(0, mat.nrow, [&](auto i) {
-				matul[i] = mat[i] % F.mod;
+				if (is_pivot_row[i])
+					matul[i] = mat[i] % F.mod;
+				else
+					matul[i].clear();
 				});
 			pool.wait();
 			if (opt->abort)
@@ -1805,9 +1828,43 @@ namespace SparseRREF {
 			// structurally different from matz, so stop before the CRT loop below
 			if (opt->abort)
 				break;
+			if (opt->bad_prime) {
+				// a pivot of the first prime vanished modulo this one: the pivot set is not
+				// valid for this prime, the caller restarts past it
+				opt->recon_status = 1;
+				opt->bad_prime_value = prime;
+				opt->verbose = verbose;
+				return pivots;
+			}
 			if (opt->is_back_sub) {
 				opt->verbose = false;
 				triangular_solver_2(matul, pivots, F, opt);
+			}
+			if (opt->abort)
+				break;
+			// the CRT accumulators were built on the first prime's support; if the support
+			// modulo this prime differs (a fill-in vanished or appeared) they cannot be
+			// merged, and writing past the shorter row would read outside its vectors
+			{
+				bool mismatch = false;
+				for (size_t i = 0; i < leftrows.size() && !mismatch; i++) {
+					size_t row = leftrows[i];
+					if (matul[row].nnz() != matz[row].nnz()) {
+						mismatch = true;
+						break;
+					}
+					for (size_t j = 0; j < matul[row].nnz(); j++)
+						if (matul[row](j) != matz[row](j)) {
+							mismatch = true;
+							break;
+						}
+				}
+				if (mismatch) {
+					opt->recon_status = 2;
+					opt->bad_prime_value = prime;
+					opt->verbose = verbose;
+					return pivots;
+				}
 			}
 			std::vector<int> flags(nthreads, 1);
 
@@ -1846,9 +1903,46 @@ namespace SparseRREF {
 				(unsigned long long)mod.bits());
 		}
 
-		mat = matq;
+		if (result_out != nullptr)
+			*result_out = matq;
+		else
+			mat = matq;
 
 		return pivots;
+	}
+
+	// RREF over Q by modular elimination, rational reconstruction and CRT. If the replay of
+	// the pivots modulo a further prime fails (a pivot vanished, or the support changed), the
+	// whole computation is restarted past that prime, up to opt->max_restarts times;
+	// opt->restarts reports how many were needed and opt->recon_status stays nonzero only
+	// when the budget was exhausted, in which case mat (or *result_out) is untouched and the
+	// returned pivots must not be used. start_prime: the first prime to try, taken from
+	// [2^60, 2^62) only (0 or anything outside: the default n_nextprime(2^60)) — the replay keeps
+	// only the rows that are pivots modulo the first prime, so a small prime, where the rank can
+	// drop, must not be used, and FLINT's nmod arithmetic needs a modulus below 2^63 (the
+	// following primes advance by a few units per restart and stay far below it);
+	// result_out: receive the RREF there and leave mat untouched (nullptr: mat becomes the
+	// RREF, as before).
+	template <typename index_t>
+	std::vector<std::vector<pivot_t<index_t>>> sparse_mat_rref_reconstruct(
+		sparse_mat<rat_t, index_t>& mat, rref_option_t opt, const bool checkrank = false,
+		ulong start_prime = 0, sparse_mat<rat_t, index_t>* result_out = nullptr) {
+
+		opt->restarts = 0;
+		ulong start = (start_prime < (1ULL << 60) || start_prime >= (1ULL << 62)) ? 0 : start_prime;
+		while (true) {
+			auto pivots = sparse_mat_rref_reconstruct_attempt(mat, opt, checkrank, start, result_out);
+			if (opt->recon_status == 0 || opt->abort || opt->restarts >= opt->max_restarts)
+				return pivots;
+			// restart past every prime known to be bad: the first prime of this attempt and
+			// the prime at which it failed
+			ulong first = next_admissible_prime(mat, start ? start : (1ULL << 60));
+			start = next_admissible_prime(mat, std::max(first, opt->bad_prime_value) + 1);
+			opt->restarts++;
+			if (opt->verbose)
+				progress_message(opt, ">> Reconstruct restart %d after status %d: first prime %llu\n",
+					opt->restarts, opt->recon_status, (unsigned long long)start);
+		}
 	}
 
 	// The kernel is read off the RREF, not off the original matrix: the pivot
@@ -1956,6 +2050,13 @@ namespace SparseRREF {
 		else if (F.ring == RING::FIELD_QQ)
 			if constexpr (std::is_same_v<T, rat_t>) {
 				pivots = sparse_mat_rref_reconstruct(M1, opt, true);
+				if (opt->recon_status != 0) {
+					std::cerr << "Error: sparse_mat_inverse: the rational reconstruction gave up after "
+						<< opt->restarts << " restarts (status " << opt->recon_status << ")" << std::endl;
+					opt->col_weight = old_col_weight;
+					opt->is_back_sub = is_back_sub;
+					return 2;
+				}
 			}
 			else {
 				// type is not rat_t when field is QQ

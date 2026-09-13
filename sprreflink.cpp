@@ -657,8 +657,14 @@ EXTERN_C DLLEXPORT int sprref_mod_rref(WolframLibraryData ld, mint Argc, MArgume
 		std::atomic<bool> cancel(false);
 		std::thread check_cancel([&]() {
 			while (!cancel) {
-				cancel = ld->AbortQ();
-				opt->abort = cancel.load();
+				// only ever set the flags, never clear them: the calling thread also sets
+				// `cancel` to stop this monitor, and a `false` written here after that
+				// would be a lost update and hang the join
+				if (ld->AbortQ()) {
+					opt->abort = true;
+					cancel = true;
+					break;
+				}
 				// wait for 100 ms before checking again
 				std::this_thread::sleep_for(std::chrono::milliseconds(100));
 			}
@@ -840,8 +846,14 @@ EXTERN_C DLLEXPORT int sprref_rat_rref(WolframLibraryData ld, mint Argc, MArgume
 		std::atomic<bool> cancel(false);
 		std::thread check_cancel([&]() {
 			while (!cancel) {
-				cancel = ld->AbortQ();
-				opt->abort = cancel.load();
+				// only ever set the flags, never clear them: the calling thread also sets
+				// `cancel` to stop this monitor, and a `false` written here after that
+				// would be a lost update and hang the join
+				if (ld->AbortQ()) {
+					opt->abort = true;
+					cancel = true;
+					break;
+				}
 				// wait for 100 ms before checking again
 				std::this_thread::sleep_for(std::chrono::milliseconds(100));
 			}
@@ -851,6 +863,12 @@ EXTERN_C DLLEXPORT int sprref_rat_rref(WolframLibraryData ld, mint Argc, MArgume
 		if (opt->abort) {
 			// the matrix is only partially reconstructed, so nothing below is
 			// meaningful (and evaluating it could read outside of its vectors)
+			cancel = true;
+			check_cancel.join();
+			return LIBRARY_FUNCTION_ERROR;
+		}
+		if (opt->recon_status != 0) {
+			// the reconstruction gave up after opt->max_restarts restarts; mat is untouched
 			cancel = true;
 			check_cancel.join();
 			return LIBRARY_FUNCTION_ERROR;

@@ -274,6 +274,13 @@ int main(int argc, char** argv) {
 	std::vector<std::vector<pivot_t<index_t>>> pivots;
 	if (prime == 0) {
 		pivots = sparse_mat_rref_reconstruct(std::get<0>(mat), opt);
+		if (opt->recon_status != 0) {
+			std::cerr << "Error: the rational reconstruction gave up after " << opt->restarts
+				<< " restarts (status " << opt->recon_status << "); no result written" << std::endl;
+			opt->abort = true; // stop the key listener
+			thread_listener.join();
+			return 1;
+		}
 	}
 	else {
 		pivots = sparse_mat_rref(std::get<1>(mat), F, opt);

@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <flint/flint.h> // ulong, used by rref_option below when this header is included first
 #include <execution>
 #include <filesystem>
 #include <fstream>
@@ -170,6 +171,14 @@ namespace SparseRREF {
 		bool progress_overwrite = true; // rewrite the progress line in place on a terminal
 		bool shrink_memory = false;
 		std::atomic<bool> abort = false;
+		// rational reconstruction (sparse_mat_rref_reconstruct): replaying the pivots modulo a
+		// further prime can meet a pivot that vanished or a fill-in support that differs from the
+		// first prime's; the function then restarts past that prime by itself and reports it here
+		std::atomic<bool> bad_prime = false;   // set by the replay when a pivot entry is missing or zero modulo the current prime
+		int recon_status = 0;                  // 0 ok; 1 a replay pivot vanished; 2 the support changed between primes (nonzero only when the restarts were exhausted)
+		ulong bad_prime_value = 0;             // the prime at which the last failure was detected (a restart goes past it)
+		int max_restarts = 8;                  // automatic restarts past a bad prime before giving up (0: report the status instead)
+		int restarts = 0;                      // restarts the last call needed
 		bool is_back_sub = true;
 		bool eliminate_one_nnz = true;
 		int method = 0;
