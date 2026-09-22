@@ -45,17 +45,23 @@ namespace SparseRREF {
 		C.reserve(nnzA * nnzB);
 		C.resize(nnzA * nnzB);
 
-		auto permA = A.gen_perm(pool);
-		auto permB = B.gen_perm(pool);
+		// an already ordered tensor needs no permutation at all, and that is the usual case: the check
+		// is one cheap pass over the indices, and when it succeeds the permutation (one size_t per
+		// entry) is never built
+		const bool idA = A.is_ordered_by(), idB = B.is_ordered_by();
+		auto permA = idA ? std::vector<size_t>() : A.gen_perm(pool);
+		auto permB = idB ? std::vector<size_t>() : B.gen_perm(pool);
+		auto permA_at = [&](const size_t k) -> size_t { return idA ? k : permA[k]; };
+		auto permB_at = [&](const size_t k) -> size_t { return idB ? k : permB[k]; };
 
 		auto fill_row = [&](const size_t r) {
-			const auto posA = permA[r];
+			const auto posA = permA_at(r);
 			const auto indexA = A.index(posA);
 			const auto valA = A.val(posA);
 			index_t* colptr = C.data.colptr + r * nnzB * rank;
 			T* valptr = C.data.valptr + r * nnzB;
 			for (size_t k = 0; k < nnzB; k++) {
-				const auto posB = permB[k];
+				const auto posB = permB_at(k);
 				s_copy(colptr + k * rank, indexA, rankA);
 				s_copy(colptr + k * rank + rankA, B.index(posB), rankB);
 				valptr[k] = scalar_mul(valA, B.val(posB), F);
@@ -115,15 +121,20 @@ namespace SparseRREF {
 
 		sparse_tensor<T, index_t, SPARSE_COO> C(A.dims(), A.nnz() + B.nnz());
 
-		auto Aperm = A.gen_perm();
-		auto Bperm = B.gen_perm();
+		// an already ordered tensor needs no permutation at all: the check is one cheap pass over the
+		// indices, and when it succeeds the permutation (one size_t per entry) is never built
+		const bool idA = A.is_ordered_by(), idB = B.is_ordered_by();
+		auto Aperm = idA ? std::vector<size_t>() : A.gen_perm();
+		auto Bperm = idB ? std::vector<size_t>() : B.gen_perm();
+		auto Aperm_at = [&](const size_t k) -> size_t { return idA ? k : Aperm[k]; };
+		auto Bperm_at = [&](const size_t k) -> size_t { return idB ? k : Bperm[k]; };
 
 		// double pointer
 		size_t i = 0, j = 0;
 		// C.zero();
 		while (i < A.nnz() && j < B.nnz()) {
-			auto posA = Aperm[i];
-			auto posB = Bperm[j];
+			auto posA = Aperm_at(i);
+			auto posB = Bperm_at(j);
 			auto indexA = A.index(posA);
 			auto indexB = B.index(posB);
 			int cmp = lexico_compare(indexA, indexB, rank);
@@ -145,16 +156,19 @@ namespace SparseRREF {
 			}
 		}
 		while (i < A.nnz()) {
-			auto posA = Aperm[i];
+			auto posA = Aperm_at(i);
 			C.push_back(A.index(posA), A.val(posA));
 			i++;
 		}
 		while (j < B.nnz()) {
-			auto posB = Bperm[j];
+			auto posB = Bperm_at(j);
 			C.push_back(B.index(posB), B.val(posB));
 			j++;
 		}
 
+		// the capacity was sized for the worst case, A.nnz() + B.nnz(); the entries that cancelled and
+		// the ones only one of the two tensors holds leave part of it unused
+		C.shrink_to_fit();
 		return C;
 	}
 
@@ -316,8 +330,15 @@ namespace SparseRREF {
 		// and B
 		index_perm_B.insert(index_perm_B.begin(), i2.begin(), i2.end());
 
-		auto permA = A.gen_perm(index_perm_A, pool);
-		auto permB = B.gen_perm(index_perm_B, pool);
+		// a tensor that already is in the contracted order needs no permutation at all, which is what
+		// the callers hand in most of the time: the check is one cheap pass over the indices, and when
+		// it succeeds the permutation -- one size_t per entry -- is never built, so the caches below
+		// are the only temporaries of that size
+		const bool idA = A.is_ordered_by(&index_perm_A), idB = B.is_ordered_by(&index_perm_B);
+		auto permA = idA ? std::vector<size_t>() : A.gen_perm(index_perm_A, pool);
+		auto permB = idB ? std::vector<size_t>() : B.gen_perm(index_perm_B, pool);
+		auto permA_at = [&](const size_t k) -> size_t { return idA ? k : permA[k]; };
+		auto permB_at = [&](const size_t k) -> size_t { return idB ? k : permB[k]; };
 
 		sparse_tensor<T, index_t, SPARSE_COO> C(dimsC);
 
@@ -372,16 +393,23 @@ namespace SparseRREF {
 			key_contract_A.resize(A.nnz());
 			key_contract_B.resize(B.nnz());
 		}
-		if (keyed_leftA)
+		// the key of a free part that is a single index is that index, and it is already in hand: the
+		// copy of B's free index below, or a read of A (which costs a gather when the entries have to be
+		// followed through a permutation, but that is cheaper than building and filling an array of one
+		// size_t per entry). Those key arrays are then not built at all, and key_leftA_at /
+		// key_leftB_at below read the index where it is
+		const bool single_leftA = left_size_A == 1;
+		const bool single_leftB = left_size_B == 1;
+		if (keyed_leftA && !single_leftA)
 			key_leftA.resize(A.nnz());
-		if (keyed_leftB)
+		if (keyed_leftB && !single_leftB)
 			key_leftB.resize(B.nnz());
 
 		// a label below zero would not order like the tuple once packed, so the keys are dropped when
 		// an entry says otherwise, and the tuples are then compared position by position
 		std::atomic<bool> negative{ false };
 		for (size_t k = 0; k < A.nnz() && (keyed_contract || keyed_leftA); k++) {
-			auto ptr = A.index(permA[k]);
+			auto ptr = A.index(permA_at(k));
 			if (keyed_contract) {
 				size_t key = 0;
 				for (size_t l = 0; l < i1i2_size; l++) {
@@ -393,14 +421,22 @@ namespace SparseRREF {
 				key_contract_A[k] = key;
 			}
 			if (keyed_leftA) {
-				size_t key = 0;
-				for (size_t l = 0; l < left_size_A; l++) {
-					const auto value = ptr[index_perm_A[l]];
-					if (value < 0)
+				if (single_leftA) {
+					// the key of a single free index is that index, so it is not packed: only its sign
+					// still has to be reported, since a negative one does not order like an unsigned key
+					if (ptr[index_perm_A[0]] < 0)
 						negative.store(true, std::memory_order_relaxed);
-					key += static_cast<size_t>(value) * stride_leftA[l];
 				}
-				key_leftA[k] = key;
+				else {
+					size_t key = 0;
+					for (size_t l = 0; l < left_size_A; l++) {
+						const auto value = ptr[index_perm_A[l]];
+						if (value < 0)
+							negative.store(true, std::memory_order_relaxed);
+						key += static_cast<size_t>(value) * stride_leftA[l];
+					}
+					key_leftA[k] = key;
+				}
 			}
 		}
 
@@ -408,7 +444,7 @@ namespace SparseRREF {
 		// inner loop of the contraction, so this pass is the longest serial stretch left in the
 		// parallel path and it is handed to the pool
 		auto pack_B = [&](const size_t k) {
-			auto ptr = B.index(permB[k]);
+			auto ptr = B.index(permB_at(k));
 			for (size_t l = 0; l < left_size_B; l++)
 				index_leftB_cache[k * left_size_B + l] = ptr[index_perm_B[i1i2_size + l]];
 			if (keyed_contract) {
@@ -422,14 +458,21 @@ namespace SparseRREF {
 				key_contract_B[k] = key;
 			}
 			if (keyed_leftB) {
-				size_t key = 0;
-				for (size_t l = 0; l < left_size_B; l++) {
-					const auto value = ptr[index_perm_B[i1i2_size + l]];
-					if (value < 0)
+				if (single_leftB) {
+					// same as A: the free index is the key, and it has just been copied to the cache
+					if (index_leftB_cache[k] < 0)
 						negative.store(true, std::memory_order_relaxed);
-					key += static_cast<size_t>(value) * stride_leftB[l];
 				}
-				key_leftB[k] = key;
+				else {
+					size_t key = 0;
+					for (size_t l = 0; l < left_size_B; l++) {
+						const auto value = ptr[index_perm_B[i1i2_size + l]];
+						if (value < 0)
+							negative.store(true, std::memory_order_relaxed);
+						key += static_cast<size_t>(value) * stride_leftB[l];
+					}
+					key_leftB[k] = key;
+				}
 			}
 			};
 
@@ -452,16 +495,27 @@ namespace SparseRREF {
 			key_leftA.clear();
 			key_leftB.clear();
 		}
+		// the key of an entry in the order of the permutations, from the key array or, when the free
+		// part is a single index, from that index itself; both are read only on the keyed paths, which
+		// the flags above turn off when a key would not order like the tuple
+		const bool keyed_leftA_single = keyed_leftA && single_leftA;
+		const bool keyed_leftB_single = keyed_leftB && single_leftB;
+		auto key_leftA_at = [&](const size_t k) -> size_t {
+			return keyed_leftA_single ? static_cast<size_t>(A.index(permA_at(k))[index_perm_A[0]]) : key_leftA[k];
+			};
+		auto key_leftB_at = [&](const size_t k) -> size_t {
+			return keyed_leftB_single ? static_cast<size_t>(index_leftB_cache[k * left_size_B]) : key_leftB[k];
+			};
 		if (!keyed_contract) {
 			index_A_cache.resize(i1i2_size * A.nnz());
 			index_B_cache.resize(i1i2_size * B.nnz());
 			for (size_t k = 0; k < A.nnz(); k++) {
-				auto ptr = A.index(permA[k]);
+				auto ptr = A.index(permA_at(k));
 				for (size_t l = 0; l < i1i2_size; l++)
 					index_A_cache[k * i1i2_size + l] = ptr[i1[l]];
 			}
 			for (size_t k = 0; k < B.nnz(); k++) {
-				auto ptr = B.index(permB[k]);
+				auto ptr = B.index(permB_at(k));
 				for (size_t l = 0; l < i1i2_size; l++)
 					index_B_cache[k * i1i2_size + l] = ptr[i2[l]];
 			}
@@ -469,18 +523,30 @@ namespace SparseRREF {
 
 		// the values of the entries in the order of the permutations: the loops below walk the runs in
 		// that order, so reading the values through the permutation would gather them at random and
-		// miss the cache on every step; the copy that builds these arrays is sequential
-		std::vector<T> val_A(A.nnz()), val_B(B.nnz());
-		for (size_t k = 0; k < A.nnz(); k++)
-			val_A[k] = A.val(permA[k]);
-		if (pool != nullptr && B.nnz() >= par_pack_threshold) {
-			pool->detach_loop(0, B.nnz(), [&](const size_t k) { val_B[k] = B.val(permB[k]); }, 4 * nthread);
-			pool->wait();
+		// miss the cache on every step; the copy that builds these arrays is sequential. When the
+		// permutation is the identity it has already been released above: the values are read where they
+		// are, and the copy and the memory it takes are skipped
+		std::vector<T> val_A, val_B;
+		if (!idA) {
+			val_A.resize(A.nnz());
+			for (size_t k = 0; k < A.nnz(); k++)
+				val_A[k] = A.val(permA_at(k));
 		}
-		else {
-			for (size_t k = 0; k < B.nnz(); k++)
-				val_B[k] = B.val(permB[k]);
+		if (!idB) {
+			val_B.resize(B.nnz());
+			if (pool != nullptr && B.nnz() >= par_pack_threshold) {
+				pool->detach_loop(0, B.nnz(), [&](const size_t k) { val_B[k] = B.val(permB_at(k)); }, 4 * nthread);
+				pool->wait();
+			}
+			else {
+				for (size_t k = 0; k < B.nnz(); k++)
+					val_B[k] = B.val(permB_at(k));
+			}
 		}
+		// the value of the entry that sits at a position of the permuted order, from the copy or, when
+		// there is no copy, from the tensor itself
+		auto val_A_at = [&](const size_t k) -> const T& { return idA ? A.val(k) : val_A[k]; };
+		auto val_B_at = [&](const size_t k) -> const T& { return idB ? B.val(k) : val_B[k]; };
 
 		auto equal_except = [](const index_t* a, const index_t* b, const std::vector<size_t>& perm, const size_t len) {
 			for (size_t i = 0; i < len; i++) {
@@ -496,13 +562,13 @@ namespace SparseRREF {
 		rowptrA.push_back(0);
 		if (keyed_leftA) {
 			for (size_t k = 1; k < A.nnz(); k++) {
-				if (key_leftA[k] != key_leftA[k - 1])
+				if (key_leftA_at(k) != key_leftA_at(k - 1))
 					rowptrA.push_back(k);
 			}
 		}
 		else {
 			for (size_t k = 1; k < A.nnz(); k++) {
-				if (!equal_except(A.index(permA[rowptrA.back()]), A.index(permA[k]), index_perm_A, left_size_A))
+				if (!equal_except(A.index(permA_at(rowptrA.back())), A.index(permA_at(k)), index_perm_A, left_size_A))
 					rowptrA.push_back(k);
 			}
 		}
@@ -614,7 +680,7 @@ namespace SparseRREF {
 				run_last.push_back(rowptrB[run + 1]);
 				work += rowptrB[run + 1] - rowptrB[run];
 				if (run_val != nullptr)
-					run_val->push_back(val_A[ptrA]);
+					run_val->push_back(val_A_at(ptrA));
 			}
 			return work;
 			};
@@ -634,7 +700,7 @@ namespace SparseRREF {
 				auto startA = rowptrA[k];
 
 				for (size_t l = 0; l < left_size_A; l++)
-					indexC[l] = A.index(permA[startA])[index_perm_A[l]];
+					indexC[l] = A.index(permA_at(startA))[index_perm_A[l]];
 
 				run_first.clear();
 				run_last.clear();
@@ -649,7 +715,7 @@ namespace SparseRREF {
 				// that keeps at least one free index is written out as it is
 				if (m == 1 && left_size_B > 0) {
 					for (size_t ptrB = run_first[0]; ptrB < run_last[0]; ptrB++) {
-						const T entry = scalar_mul(run_val[0], val_B[ptrB], F);
+						const T entry = scalar_mul(run_val[0], val_B_at(ptrB), F);
 						if (entry != 0) {
 							s_copy(indexC.data() + left_size_A, index_leftB_cache.data() + ptrB * left_size_B,
 								left_size_B);
@@ -664,7 +730,7 @@ namespace SparseRREF {
 					T entry = 0;
 					for (size_t j = 0; j < m; j++) {
 						for (size_t ptrB = run_first[j]; ptrB < run_last[j]; ptrB++)
-							entry = scalar_add(entry, scalar_mul(run_val[j], val_B[ptrB], F), F);
+							entry = scalar_add(entry, scalar_mul(run_val[j], val_B_at(ptrB), F), F);
 					}
 					if (entry != 0)
 						C.push_back(indexC, entry);
@@ -672,9 +738,9 @@ namespace SparseRREF {
 				// two runs merge with two pointers, which beats a heap of two entries
 				else if (m == 2) {
 					size_t p0 = run_first[0], p1 = run_first[1];
-					const bool keyed = !key_leftB.empty();
+					const bool keyed = keyed_leftB;
 					auto advance = [&](const size_t j, const size_t ptrB) {
-						const T entry = scalar_mul(run_val[j], val_B[ptrB], F);
+						const T entry = scalar_mul(run_val[j], val_B_at(ptrB), F);
 						if (entry != 0) {
 							s_copy(indexC.data() + left_size_A, index_leftB_cache.data() + ptrB * left_size_B,
 								left_size_B);
@@ -683,7 +749,7 @@ namespace SparseRREF {
 						};
 					auto compare_free = [&](const size_t a, const size_t b) {
 						if (keyed)
-							return key_leftB[a] < key_leftB[b] ? -1 : key_leftB[a] > key_leftB[b] ? 1 : 0;
+							return key_leftB_at(a) < key_leftB_at(b) ? -1 : key_leftB_at(a) > key_leftB_at(b) ? 1 : 0;
 						return lexico_compare(index_leftB_cache.data() + a * left_size_B,
 							index_leftB_cache.data() + b * left_size_B, left_size_B);
 						};
@@ -699,8 +765,8 @@ namespace SparseRREF {
 							p1++;
 						}
 						else {
-							const T entry = scalar_add(scalar_mul(run_val[0], val_B[p0], F),
-								scalar_mul(run_val[1], val_B[p1], F), F);
+							const T entry = scalar_add(scalar_mul(run_val[0], val_B_at(p0), F),
+								scalar_mul(run_val[1], val_B_at(p1), F), F);
 							if (entry != 0) {
 								s_copy(indexC.data() + left_size_A, index_leftB_cache.data() + p0 * left_size_B,
 									left_size_B);
@@ -722,7 +788,7 @@ namespace SparseRREF {
 				else {
 					pos.resize(m);
 
-					const bool keyed = !key_leftB.empty();
+					const bool keyed = keyed_leftB;
 
 					// the heap holds the key of the entry that waits at the front of a run next to the
 					// slot of that run: the order of two runs is then one comparison of two words that
@@ -732,7 +798,7 @@ namespace SparseRREF {
 					heap.clear();
 					for (size_t j = 0; j < m; j++) {
 						pos[j] = run_first[j];
-						heap.emplace_back(keyed ? key_leftB[pos[j]] : 0, j);
+						heap.emplace_back(keyed ? key_leftB_at(pos[j]) : 0, j);
 					}
 
 					auto free_front = [&](const size_t j) {
@@ -757,9 +823,9 @@ namespace SparseRREF {
 							const size_t j = heap.front().second;
 							std::pop_heap(heap.begin(), heap.end(), later);
 							heap.pop_back();
-							entry = scalar_add(entry, scalar_mul(run_val[j], val_B[pos[j]], F), F);
+							entry = scalar_add(entry, scalar_mul(run_val[j], val_B_at(pos[j]), F), F);
 							if (++pos[j] < run_last[j]) {
-								heap.emplace_back(keyed ? key_leftB[pos[j]] : 0, j);
+								heap.emplace_back(keyed ? key_leftB_at(pos[j]) : 0, j);
 								std::push_heap(heap.begin(), heap.end(), later);
 							}
 						} while (!heap.empty() && (keyed ? heap.front().first == key_min
@@ -780,6 +846,8 @@ namespace SparseRREF {
 
 			if (rows < 2 * nthread) {
 				method(C, 0, rows);
+				// this path grows C by push_back, so its capacity can be twice what it holds
+				C.shrink_to_fit();
 				return C;
 			}
 
@@ -843,6 +911,8 @@ namespace SparseRREF {
 		}
 		else {
 			method(C, 0, rowptrA.size() - 1);
+			// as above: the merge reserves exactly, this path does not
+			C.shrink_to_fit();
 			return C;
 		}
 	}
@@ -1097,6 +1167,9 @@ namespace SparseRREF {
 			}
 		}
 
+		// the sequential path above grows C by push_back, so the result can hold twice what it needs;
+		// the parallel merge already reserved exactly
+		C.shrink_to_fit();
 		return C;
 	}
 
@@ -1550,6 +1623,9 @@ namespace SparseRREF {
 			C.push_back(index, acc.vals[a]);
 		}
 
+		// the accumulator was sized for every product of the join, and the entries that cancelled to
+		// zero are skipped above, so the table is usually larger than the result
+		C.shrink_to_fit();
 		return C;
 	}
 

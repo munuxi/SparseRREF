@@ -921,6 +921,9 @@ namespace SparseRREF {
 			release();
 		}
 
+		// IMPORTANT: it only affects the capacity of colptr and valptr and do nothing on 
+		// rowptr, dims (and of course nnz), so be careful when using it, it may leads to 
+		// alloc < nnz() and cause memory corruption
 		void reserve(const size_t size) {
 			if (size == alloc)
 				return;
@@ -949,6 +952,8 @@ namespace SparseRREF {
 			}
 			alloc = size;
 		}
+
+		void shrink_to_fit() { reserve(nnz()); }
 
 		// change the dimensions of the tensor
 		// it is dangerous, only for internal use
@@ -2098,6 +2103,7 @@ namespace SparseRREF {
 		void canonicalize() { data.canonicalize(); }
 		void sort_indices(thread_pool* pool = nullptr) { data.sort_indices(pool); }
 		void reserve(const size_t size) { data.reserve(size); }
+		void shrink_to_fit() { data.shrink_to_fit(); }
 		sparse_tensor transpose(const std::vector<size_t>& perm, thread_pool* pool = nullptr, const bool sort_ind = true) const {
 			sparse_tensor B;
 			B.data = data.transpose(perm, pool, sort_ind);
@@ -2425,6 +2431,7 @@ namespace SparseRREF {
 		inline bool check_sorted() const { return data.check_sorted(); }
 		inline void zero() { data.zero(); }
 		inline void reserve(size_t size) { data.reserve(size); }
+		inline void shrink_to_fit() { data.shrink_to_fit(); }
 		inline void resize(size_t new_nnz) {
 			if (new_nnz > alloc())
 				reserve(new_nnz);
@@ -2646,6 +2653,29 @@ namespace SparseRREF {
 			return mat;
 		}
 
+		// true when the entries already are in the order that gen_perm_by() would put them in, i.e.
+		// when the permutation it returns is the identity: a caller that only walks the entries in that
+		// order can ask this and skip building the permutation (one size_t per entry) altogether
+		bool is_ordered_by(const std::vector<size_t>* order = nullptr) const {
+			// a positions list of the wrong size is ignored by gen_perm, which orders by the natural
+			// order instead, so it is ignored here as well
+			if (order != nullptr && order->size() != rank())
+				order = nullptr;
+			const auto r = rank();
+			const auto nz = nnz();
+			if (order == nullptr) {
+				for (size_t i = 1; i < nz; i++)
+					if (!(lexico_compare(index(i - 1), index(i), r) <= 0))
+						return false;
+			}
+			else {
+				for (size_t i = 1; i < nz; i++)
+					if (!(lexico_compare(index(i - 1), index(i), *order) <= 0))
+						return false;
+			}
+			return true;
+		}
+
 		// the permutation that orders the entries by the labels at the positions listed in order, or by
 		// all the labels in the natural order when order is nullptr
 		// the entries are usually already in that order, because the callers hand in tensors that were
@@ -2657,18 +2687,9 @@ namespace SparseRREF {
 			// the counting passes below keep one bucket per label, so only the orderings whose
 			// dimensions add up to a manageable number of buckets are counted
 			constexpr size_t max_buckets = 1u << 20;
-			bool sorted = true;
-			if (order == nullptr) {
-				for (size_t i = 1; i < nz && sorted; i++)
-					sorted = lexico_compare(index(i - 1), index(i), r) <= 0;
-			}
-			else {
-				for (size_t i = 1; i < nz && sorted; i++)
-					sorted = lexico_compare(index(i - 1), index(i), *order) <= 0;
-			}
 
 			std::vector<size_t> perm = perm_init(nz);
-			if (sorted)
+			if (is_ordered_by(order))
 				return perm;
 
 			// the ordering can also be obtained by counting the labels one position at a time: a
