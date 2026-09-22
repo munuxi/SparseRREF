@@ -1038,7 +1038,7 @@ namespace SparseRREF {
 				}
 				newrowptr[i + 1] = index;
 			}
-			rowptr = newrowptr;
+			rowptr = std::move(newrowptr);
 		}
 
 		std::pair<index_p, T*> row(const size_t i) {
@@ -2074,7 +2074,7 @@ namespace SparseRREF {
 			data.rowptr = { 0 };
 		}
 		~sparse_tensor() {}
-		sparse_tensor(const std::vector<size_t> l, size_t aoc = 8) : data(l, aoc) {}
+		sparse_tensor(const std::vector<size_t>& l, size_t aoc = 8) : data(l, aoc) {}
 		sparse_tensor(const sparse_tensor& l) : data(l.data) {}
 		sparse_tensor(sparse_tensor&& l) noexcept : data(std::move(l.data)) {}
 		sparse_tensor& operator=(const sparse_tensor& l) { data = l.data; return *this; }
@@ -2259,7 +2259,7 @@ namespace SparseRREF {
 			}
 			for (size_t i = 0; i < data.dims[0]; i++)
 				rowptr[i + 1] += rowptr[i];
-			data.rowptr = rowptr;
+			data.rowptr = std::move(rowptr);
 			data.rank = newrank;
 			// colptr only holds nnz * (rank - 1) indices now, so alloc must not claim more than that:
 			// a later copy reads exactly alloc * (rank - 1) of them
