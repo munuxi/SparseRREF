@@ -357,8 +357,9 @@ namespace SparseRREF {
 		// the entries that start a run can be kept in a flat array, which makes the binary searches
 		// below walk that array instead of chasing rowptrB. A tuple that does not fit keeps its cache
 		// and is compared position by position
-		constexpr size_t max_buckets = 1u << 20;
 		constexpr size_t par_pack_threshold = 1u << 17;
+		// what a slot of the direct lookup table holds while no run of B starts at that tuple
+		constexpr uint32_t no_run = std::numeric_limits<uint32_t>::max();
 		std::vector<size_t> cstride(i1i2_size, 1), stride_leftA(left_size_A, 1), stride_leftB(left_size_B, 1);
 		bool keyed_contract = i1i2_size > 0, keyed_leftA = left_size_A > 0, keyed_leftB = left_size_B > 0;
 		for (size_t l = i1i2_size; l-- > 1;) {
@@ -385,6 +386,21 @@ namespace SparseRREF {
 			}
 			stride_leftB[l - 1] = stride_leftB[l] * dim;
 		}
+
+		// the loops above build the product of the dimensions of the axes past the first one, but a key
+		// also adds value * stride[0] of the first one, and that is where the key space of a tuple ends:
+		// a space that does not fit in a word would wrap the keys around and let two different tuples
+		// share one, which the run grouping and the search below cannot tell apart. The packing is
+		// dropped in that case, and the tuples are compared position by position instead
+		constexpr size_t size_max = std::numeric_limits<size_t>::max();
+		if (keyed_contract && (dimsA[i1[0]] == 0 || cstride[0] > size_max / dimsA[i1[0]]))
+			keyed_contract = false;
+		if (keyed_leftA && left_size_A >= 2
+			&& (dimsA[index_perm_A[0]] == 0 || stride_leftA[0] > size_max / dimsA[index_perm_A[0]]))
+			keyed_leftA = false;
+		if (keyed_leftB && left_size_B >= 2
+			&& (dimsB[index_perm_B[i1i2_size]] == 0 || stride_leftB[0] > size_max / dimsB[index_perm_B[i1i2_size]]))
+			keyed_leftB = false;
 
 		std::vector<index_t> index_A_cache, index_B_cache;
 		std::vector<index_t> index_leftB_cache(left_size_B * B.nnz());
@@ -595,41 +611,59 @@ namespace SparseRREF {
 		const size_t runsB = rowptrB.size() - 1;
 
 		// the contract tuple of the entries that start the runs, so that the search below reads one
-		// flat array, and, when the contract tuple is a single label that is small enough, the run
-		// that holds each label, so that the search of the run of an entry of A is one array read
-		std::vector<size_t> run_key, run_of_value;
+		// flat array, and, when the whole tuple space is small enough to be addressed directly, the run
+		// that holds each tuple, so that the search of the run of an entry of A is one array read
+		// instead of a binary search over the runs. The key of a tuple is its mixed radix packing, so
+		// that table needs one slot per tuple of the contract dimensions
+		std::vector<size_t> run_key;
+		std::vector<uint32_t> run_of_key;
 		if (keyed_contract) {
 			run_key.resize(runsB);
 			for (size_t r = 0; r < runsB; r++)
 				run_key[r] = key_contract_B[rowptrB[r]];
-		}
-		if (keyed_contract && i1i2_size == 1 && dimsA[i1[0]] > 0 && dimsA[i1[0]] <= max_buckets) {
-			run_of_value.assign(dimsA[i1[0]], std::numeric_limits<size_t>::max());
-			for (size_t r = 0; r < runsB; r++)
-				run_of_value[run_key[r]] = r;
+
+			// a run index is stored in 32 bits, so a tensor with more than 2^32 entries keeps the
+			// binary search; the two caps keep the table from being much larger than the runs it
+			// describes -- at most 64 bytes of table per run, and 64 MB in total -- since a tuple space
+			// that is wide but sparsely used is answered by the search below
+			constexpr size_t max_run_table = 1u << 24;
+			const size_t first_dim = dimsA[i1[0]];
+			const bool tuples_fit = first_dim != 0 && cstride[0] <= std::numeric_limits<size_t>::max() / first_dim;
+			const size_t tuples = tuples_fit ? cstride[0] * first_dim : 0;
+			if (runsB < no_run && tuples_fit && tuples <= max_run_table && tuples <= 16 * runsB + (1u << 16)) {
+				run_of_key.assign(tuples, no_run);
+				for (size_t r = 0; r < runsB; r++) {
+					// an index outside its dimension, which a hand made tensor can hold, would fall
+					// outside the table: such a run is left out, exactly as the search below skips a
+					// tuple that no run of B holds
+					if (run_key[r] < tuples)
+						run_of_key[run_key[r]] = static_cast<uint32_t>(r);
+				}
+			}
 		}
 
 		// the runs of B that a row of A reaches: the entries of a row are ordered by their contract
 		// tuple, so the run of B that holds a contract tuple is found by binary search, and the search
-		// of the next entry starts at the run found for the previous one; when the contract tuple is a
-		// single small label the lookup table answers in one read, and no search is needed at all.
+		// of the next entry starts at the run found for the previous one; when the tuple space is
+		// small enough the lookup table answers in one read, and no search is needed at all.
 		// The work of a row is the number of entries of B it reads, which the rows are handed out by
 		// when the contraction runs on several threads
 		auto select = [&](const size_t k, std::vector<size_t>& run_first, std::vector<size_t>& run_last,
 			std::vector<T>* run_val) {
-			const bool tabulated = !run_of_value.empty();
+			const bool tabulated = !run_of_key.empty();
 			size_t work = 0;
 			size_t lo = 0;
 			for (size_t ptrA = rowptrA[k]; ptrA < rowptrA[k + 1]; ptrA++) {
 				size_t run;
 
 				if (tabulated) {
-					const size_t value = key_contract_A[ptrA];
-					if (value >= run_of_value.size())
+					const size_t key = key_contract_A[ptrA];
+					if (key >= run_of_key.size())
 						continue;
-					run = run_of_value[value];
-					if (run == std::numeric_limits<size_t>::max())
+					const uint32_t r = run_of_key[key];
+					if (r == no_run)
 						continue;
+					run = r;
 				}
 				else if (keyed_contract) {
 					const size_t key = key_contract_A[ptrA];
@@ -685,7 +719,24 @@ namespace SparseRREF {
 			return work;
 			};
 
-		auto method = [&](sparse_tensor<T, index_t>& C, size_t ss, size_t ee) {
+		// what the row loop below writes its entries to: the result tensor itself, or, in the parallel
+		// path, a first pass that only counts them, since the second pass needs to know where the slice
+		// of each block starts before it can write into it
+		struct count_sink {
+			size_t n = 0;
+			void push_back(const index_v&, const T&) { n++; }
+			};
+		struct slice_sink {
+			sparse_tensor<T, index_t, SPARSE_COO>* target = nullptr;
+			size_t pos = 0;
+			void push_back(const index_v& l, const T& val) {
+				s_copy(target->data.colptr + pos * target->rank(), l.data(), target->rank());
+				target->data.valptr[pos] = val;
+				pos++;
+				};
+			};
+
+		auto method = [&]<typename Sink>(Sink& C, size_t ss, size_t ee) {
 			index_v indexC(dimsC.size());
 
 			// the runs of B that the row that is being built reaches, the entry of A that reaches each
@@ -880,30 +931,30 @@ namespace SparseRREF {
 			}
 			ranges[nblocks - 1].second = rows;
 
-			std::vector<sparse_tensor<T, index_t, SPARSE_COO>> Cs(nblocks, C);
-
-			pool->detach_sequence(0, nblocks, [&](size_t i) {
-				method(Cs[i], ranges[i].first, ranges[i].second);
+			// the entries every block writes, counted before the result is filled: each block then writes
+			// into its own slice of the result, which is reserved once, instead of into a tensor of its
+			// own that the result copies afterwards. Both passes walk the same rows in the same order, so
+			// the second writes exactly what the first counted
+			std::vector<size_t> block_nnz(nblocks, 0);
+			pool->detach_sequence(0, nblocks, [&](const size_t i) {
+				count_sink sink;
+				method(sink, ranges[i].first, ranges[i].second);
+				block_nnz[i] = sink.n;
 				});
 			pool->wait();
 
-			// merge the results
 			size_t allnnz = 0;
 			std::vector<size_t> start_pos(nblocks);
 			for (size_t i = 0; i < nblocks; i++) {
 				start_pos[i] = allnnz;
-				allnnz += Cs[i].nnz();
+				allnnz += block_nnz[i];
 			}
 
 			C.reserve(allnnz);
 			C.resize(allnnz);
-			pool->detach_loop(0, nblocks, [&](size_t i) {
-				const auto tmpnnz = Cs[i].nnz();
-				T* valptr = C.data.valptr + start_pos[i];
-				index_p colptr = C.data.colptr + start_pos[i] * C.rank();
-				s_copy(colptr, Cs[i].data.colptr, tmpnnz * C.rank());
-				s_copy(valptr, Cs[i].data.valptr, tmpnnz);
-				Cs[i].clear();
+			pool->detach_sequence(0, nblocks, [&](const size_t i) {
+				slice_sink sink{ &C, start_pos[i] };
+				method(sink, ranges[i].first, ranges[i].second);
 				});
 			pool->wait();
 
@@ -1687,6 +1738,15 @@ namespace SparseRREF {
 						std::cerr << "Error: sparse_tensor_read: wrong format in the tensor file" << std::endl;
 						return sparse_tensor<T, index_t, SPARSE_COO>();
 					}
+					// the file gives its coordinates in the 1-based form of the exchange formats: a 0
+					// would wrap around below and reach the tensor as a negative index, and a coordinate
+					// outside its level, or past what an index can hold, would be carried in as one that
+					// no query can match
+					if (coord == 0 || coord > dims[count]
+						|| coord - 1 > static_cast<uint64_t>(std::numeric_limits<index_t>::max())) {
+						std::cerr << "Error: sparse_tensor_read: an index is out of range" << std::endl;
+						return sparse_tensor<T, index_t, SPARSE_COO>();
+					}
 					index.push_back(static_cast<index_t>(coord - 1));
 					count++;
 				}
@@ -1716,6 +1776,16 @@ namespace SparseRREF {
 			if (val_ok != 0) {
 				std::cerr << "Error: sparse_tensor_read: the value is not a number: "
 					<< line.substr(start) << std::endl;
+				return sparse_tensor<T, index_t, SPARSE_COO>();
+			}
+
+			// the value is the last field of its line: a field after it would be read as part of the
+			// value by set_str, which stops at the first character it cannot use, and the rest would be
+			// dropped without a word
+			const size_t value_end = line.find(' ', start);
+			if (value_end != std::string::npos
+				&& line.find_first_not_of(" \t\r\n", value_end) != std::string::npos) {
+				std::cerr << "Error: sparse_tensor_read: wrong format in the tensor file" << std::endl;
 				return sparse_tensor<T, index_t, SPARSE_COO>();
 			}
 
