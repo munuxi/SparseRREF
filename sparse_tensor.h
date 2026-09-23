@@ -330,6 +330,12 @@ namespace SparseRREF {
 		// of rows
 		index_perm_B.insert(index_perm_B.begin(), i2.begin(), i2.end());
 
+		// an empty operand leaves the result empty: nothing below has to be built for it, and in
+		// particular the other operand is not ordered
+		sparse_tensor<T, index_t, SPARSE_COO> C(dimsC);
+		if (A.nnz() == 0 || B.nnz() == 0)
+			return C;
+
 		// a tensor that already is in the contracted order needs no permutation, which is what the
 		// callers hand in: the check is one cheap pass, and when it succeeds the permutation -- one
 		// size_t per entry -- is never built
@@ -339,15 +345,9 @@ namespace SparseRREF {
 		auto permA_at = [&](const size_t k) -> size_t { return idA ? k : permA[k]; };
 		auto permB_at = [&](const size_t k) -> size_t { return idB ? k : permB[k]; };
 
-		sparse_tensor<T, index_t, SPARSE_COO> C(dimsC);
-
 		auto i1i2_size = i1.size();
 		auto left_size_A = A.rank() - i1i2_size;
 		auto left_size_B = B.rank() - i1i2_size;
-
-		// an empty operand leaves the caches below empty, so there is nothing to read from them
-		if (A.nnz() == 0 || B.nnz() == 0)
-			return C;
 
 		// the contract and free tuples of every entry, in the order of the permutations, so that the
 		// loops below compare neighbouring entries without following an index permutation. A tuple is
@@ -624,6 +624,14 @@ namespace SparseRREF {
 			}
 		}
 
+		// when there is no table, the run of an entry of A costs a search, and the three passes look it
+		// up again each time: the first one remembers it here and the other two read it back. Only the
+		// run index is stored, its boundaries follow from rowptrB
+		std::vector<uint32_t> run_of_entry;
+		// only the parallel path looks a run up more than once, so only it keeps the cache
+		if (run_of_key.empty() && runsB < no_run && pool != nullptr && rowptrA.size() - 1 >= 2 * nthread)
+			run_of_entry.assign(A.nnz(), no_run);
+
 		// the runs of B that a row of A reaches: the entries of a row are ordered by their contract
 		// tuple, so its run is found by binary search, starting at the run of the previous entry, or by
 		// one read of the lookup table when the tuple space is small enough.
@@ -632,11 +640,22 @@ namespace SparseRREF {
 		auto select = [&](const size_t k, std::vector<size_t>& run_first, std::vector<size_t>& run_last,
 			std::vector<T>* run_val, const bool work_only = false) {
 			const bool tabulated = !run_of_key.empty();
+			// the passes after the work pass read the run of an entry back instead of searching it,
+			// so the test is hoisted out of the loop
+			const bool cached_runs = !run_of_entry.empty();
 			size_t work = 0;
 			size_t lo = 0;
 			for (size_t ptrA = rowptrA[k]; ptrA < rowptrA[k + 1]; ptrA++) {
 				size_t run;
 
+				// the passes after the one that searched read the run back from the cache
+				if (!work_only && cached_runs) {
+					const uint32_t cached = run_of_entry[ptrA];
+					if (cached == no_run)
+						continue;
+					run = cached;
+				}
+				else {
 				if (tabulated) {
 					const size_t key = key_contract_A[ptrA];
 					if (key >= run_of_key.size())
@@ -688,6 +707,11 @@ namespace SparseRREF {
 						continue;
 
 					run = low;
+				}
+
+					// the pass that searched remembers the run for the passes that follow it
+					if (cached_runs)
+						run_of_entry[ptrA] = static_cast<uint32_t>(run);
 				}
 
 				// the contract tuples of a row are distinct, so the runs it reaches are disjoint
