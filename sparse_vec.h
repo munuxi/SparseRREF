@@ -348,8 +348,10 @@ namespace SparseRREF {
 	template <typename index_t>
 	int_t sparse_vec_denominator_lcm(const sparse_vec<rat_t, index_t>& vec) {
 		int_t d = 1;
+		int_t den_i; // reused, den() would build and destroy an int_t per entry
 		for (size_t i = 0; i < vec.nnz(); i++) {
-			d = Flint::LCM(d, vec[i].den());
+			vec[i].den_to(den_i);
+			d = Flint::LCM(d, den_i);
 		}
 		return d;
 	}
@@ -358,12 +360,18 @@ namespace SparseRREF {
 	int_t sparse_vec_height(const sparse_vec<rat_t, index_t>& vec) {
 		if (vec.nnz() == 0)
 			return 1;
-		int_t d = sparse_vec_denominator_lcm(vec);
-		int_t h = (vec[0] * d).height();
-		for (size_t i = 1; i < vec.nnz(); i++) {
-			int_t hi = (vec[i] * d).height();
-			if (hi > h)
-				h = hi;
+		const int_t d = sparse_vec_denominator_lcm(vec);
+		int_t h = 1; // the height of an integer is at least 1
+		int_t num_i, den_i, scaled;
+		for (size_t i = 0; i < vec.nnz(); i++) {
+			vec[i].num_to(num_i);
+			vec[i].den_to(den_i);
+			// every denominator divides d, so vec[i] * d is the integer num_i * (d / den_i)
+			call_flint(fmpz_divexact, scaled, d, den_i);
+			scaled *= num_i;
+			scaled.abs_r();
+			if (scaled > h)
+				h = scaled;
 		}
 		return h;
 	}

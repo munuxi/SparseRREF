@@ -56,14 +56,14 @@ namespace SparseRREF {
 
 	namespace WXF_HELPER {
 		// value fits in int64_t as an integer
-		inline bool value_fits_si(const rat_t& value) { return value.is_integer() && value.num().fits_si(); }
+		inline bool value_fits_si(const rat_t& value) { return value.is_integer() && call_flint(fmpz_fits_si, value.num_data()); }
 		inline bool value_fits_si(const int_t& value) { return value.fits_si(); }
-		inline bool value_fits_si(ulong value) { return value <= static_cast<ulong>(INT64_MAX); }
+		inline bool value_fits_si(ulong value) { return value <= (ulong)(INT64_MAX); }
 
 		// value to int64_t (unchecked!!)
-		inline int64_t value_to_si(const rat_t& value) { return static_cast<int64_t>(value.num().to_si()); }
-		inline int64_t value_to_si(const int_t& value) { return static_cast<int64_t>(value.to_si()); }
-		inline int64_t value_to_si(ulong value) { return static_cast<int64_t>(value); }
+		inline int64_t value_to_si(const rat_t& value) { return (int64_t)(call_flint(fmpz_get_si, value.num_data())); }
+		inline int64_t value_to_si(const int_t& value) { return (int64_t)(value.to_si()); }
+		inline int64_t value_to_si(ulong value) { return (int64_t)(value); }
 
 		template <typename T>
 			requires std::is_same_v<T, int_t> || std::is_same_v<T, ulong>
@@ -74,15 +74,30 @@ namespace SparseRREF {
 				enc.push_bigint(scalar_to_str(value));
 		}
 
+		// a numerator or a denominator: the small case is the common one and must not build an int_t
+		inline void push_numerator(WXF_PARSER::Encoder& enc, const rat_t& value) {
+			if (call_flint(fmpz_fits_si, value.num_data()))
+				enc.push_integer((int64_t)(call_flint(fmpz_get_si, value.num_data())));
+			else
+				push_value(enc, value.num()); // does not fit int64: one copy, and only here
+		}
+
+		inline void push_denominator(WXF_PARSER::Encoder& enc, const rat_t& value) {
+			if (call_flint(fmpz_fits_si, value.den_data()))
+				enc.push_integer((int64_t)(call_flint(fmpz_get_si, value.den_data())));
+			else
+				push_value(enc, value.den());
+		}
+
 		inline void push_value(WXF_PARSER::Encoder& enc, const rat_t& value) {
 			if (value.is_integer()) {
-				push_value(enc, value.num());
+				push_numerator(enc, value);
 			}
 			else {
 				// func,2,symbol,8,"Rational"
 				enc.push_ustr("f\x02s\x08Rational");
-				push_value(enc, value.num());
-				push_value(enc, value.den());
+				push_numerator(enc, value);
+				push_denominator(enc, value);
 			}
 		}
 

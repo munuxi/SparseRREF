@@ -1788,11 +1788,18 @@ namespace SparseRREF {
 			const int_t& mod, const int_t& m_height) -> bool {
 			int_t d = sparse_mat_denominator_lcm(matq);
 			int_t h = 1;
+			int_t num_ij, den_ij, scaled; // reused: these are big integers
 			for (size_t i = 0; i < matq.nrow; i++) {
 				for (size_t j = 0; j < matq[i].nnz(); j++) {
-					int_t hi = (matq[i][j] * d).num().abs(); // since denominator is 1, height() = num().abs()
-					if (hi > h)
-						h = hi;
+					// every denominator divides d, so matq[i][j] * d is the integer num * (d / den),
+					// and its height is its absolute value: no rational multiply, no canonicalisation
+					matq[i][j].num_to(num_ij);
+					matq[i][j].den_to(den_ij);
+					call_flint(fmpz_divexact, scaled, d, den_ij);
+					scaled *= num_ij;
+					scaled.abs_r();
+					if (scaled > h)
+						h = scaled;
 				}
 			}
 			return m_height * matq.ncol * h < mod;

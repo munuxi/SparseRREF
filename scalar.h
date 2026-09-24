@@ -11,6 +11,8 @@
 
 #include <string>
 #include <cstring>
+#include <type_traits>
+#include <utility>
 #include "flint/nmod.h"
 #include "flint/fmpz.h"
 #include "flint/fmpq.h"
@@ -45,30 +47,12 @@ namespace Flint {
 	template <typename T>
 	concept unsigned_builtin_integral = builtin_integral<T> && std::is_unsigned_v<T>;
 
-#ifdef USE_MIMALLOC
-	static void* mi_gmp_realloc(void* ptr, size_t old_size, size_t new_size) {
-		void* new_ptr = mi_realloc(ptr, new_size);
-		return new_ptr;
-	}
+	// our number types, defined below: the concept only needs them declared
+	struct int_t;
+	struct rat_t;
 
-	static void mi_gmp_free(void* ptr, size_t size) { mi_free(ptr); }
-#endif
-
-	// set memory functions for flint
-	inline void set_memory_functions() {
-#ifdef USE_MIMALLOC
-		mp_set_memory_functions(&mi_malloc, &mi_gmp_realloc, &mi_gmp_free);
-		__flint_set_memory_functions(&mi_malloc, &mi_calloc, &mi_realloc, &mi_free);
-#endif
-	}
-
-	// clear flint's cache:
-	// usually it's not necessary to call this function for one-time computation,
-	// just returning the main function and leaving the memory cleanup to OS.
-	// If one wants make some memory leak analyzer happy, 
-	// just call this function at the end of main function.
-	// Note: double calling this function may cause problems!
-	inline void clear_cache() { flint_cleanup_master(); }
+	template<typename T>
+	concept Flint_type = IsOneOf<T, int_t, rat_t>;
 
 	struct int_t {
 		fmpz _data;
@@ -119,12 +103,13 @@ namespace Flint {
 		template <signed_builtin_integral T> int_t& operator=(const T a) { fmpz_set_si(&_data, a); return *this; }
 		template <unsigned_builtin_integral T> int_t& operator=(const T a) { fmpz_set_ui(&_data, a); return *this; }
 
-		bool operator==(const int_t other) const { return fmpz_equal(&_data, &other._data); }
+		bool operator==(const int_t& other) const { return fmpz_equal(&_data, &other._data); }
 		template <unsigned_builtin_integral T> bool operator==(const T other) const { return fmpz_equal_ui(&_data, other); }
 		template <signed_builtin_integral T> bool operator==(const T other) const { return fmpz_equal_si(&_data, other); }
-		bool operator!=(const int_t other) const { return !operator==(other); }
+		bool operator!=(const int_t& other) const { return !operator==(other); }
+		template <builtin_integral T> bool operator!=(const T other) const { return !operator==(other); }
 
-		auto operator<=>(const int_t other) const { return fmpz_cmp(&_data, &other._data) <=> 0; }
+		auto operator<=>(const int_t& other) const { return fmpz_cmp(&_data, &other._data) <=> 0; }
 		template <unsigned_builtin_integral T> auto operator<=>(const T other) const { return fmpz_cmp_ui(&_data, other) <=> 0; }
 		template <signed_builtin_integral T> auto operator<=>(const T other) const { return fmpz_cmp_si(&_data, other) <=> 0; }
 
@@ -259,8 +244,13 @@ namespace Flint {
 		ulong height_bits() const { return fmpq_height_bits(&_data); }
 		bool is_integer() const { return fmpz_is_one(fmpq_denref(&_data)); }
 
-		int_t num() const { return fmpq_numref(&_data); }
-		int_t den() const { return fmpq_denref(&_data); }
+		// num() and den() build a fresh int_t, so every call copies the whole integer: use
+		// num_data()/den_data() to read in place, and num_to()/den_to() to fill a buffer that a
+		// loop can reuse
+		void num_to(int_t& out) const { fmpz_set(&out._data, fmpq_numref(&_data)); }
+		void den_to(int_t& out) const { fmpz_set(&out._data, fmpq_denref(&_data)); }
+		int_t num() const { int_t result; num_to(result); return result; }
+		int_t den() const { int_t result; den_to(result); return result; }
 		int sign() const { return fmpq_sgn(&_data); }
 
 		fmpz* num_data() { return fmpq_numref(&_data); }
@@ -303,7 +293,8 @@ namespace Flint {
 				return fmpq_is_one(&_data);
 			return fmpq_equal_ui((fmpq*)&_data, other);
 		};
-		template<typename T> bool operator!=(const T other) const { return !operator==(other); }
+		template<typename T> requires (IsOneOf<T, int_t, rat_t> || builtin_integral<T>)
+		bool operator!=(const T& other) const { return !operator==(other); }
 
 		rat_t operator+(const rat_t& other) const { rat_t result; fmpq_add(&result._data, &_data, &other._data); return result; }
 		template <unsigned_builtin_integral T> rat_t operator+(const T other) const { rat_t result; fmpq_add_ui(&result._data, &_data, other); return result; }
@@ -344,18 +335,18 @@ namespace Flint {
 		void operator/=(const int_t& other) { fmpq_div_fmpz(&_data, &_data, &other._data); }
 
 		ulong operator%(const nmod_t& mod) const {
-			auto nummod = num() % mod;
-			auto denmod = den() % mod;
-			return nmod_div(nummod, denmod, mod);
+			return nmod_div(fmpz_get_nmod(num_data(), mod), fmpz_get_nmod(den_data(), mod), mod);
 		}
 
 		void operator++() { fmpq_add_ui(&_data, &_data, 1); }
 		void operator--() { fmpq_sub_ui(&_data, &_data, 1); }
 
 		int_t height() const {
-			int_t num_abs = num().abs();
-			int_t den_abs = den().abs();
-			return (num_abs > den_abs) ? num_abs : den_abs;
+			const fmpz* numref = num_data();
+			const fmpz* denref = den_data();
+			int_t result;
+			fmpz_abs(&result._data, fmpz_cmpabs(numref, denref) >= 0 ? numref : denref);
+			return result;
 		}
 		rat_t pow(const int_t& n) const { rat_t result; fmpq_pow_fmpz(&result._data, &_data, &n._data); return result; }
 		template <signed_builtin_integral T>
@@ -394,9 +385,29 @@ namespace Flint {
 		}
 	};
 
-	// our number types
-	template<typename T>
-	concept Flint_type = IsOneOf<T, int_t, rat_t>;
+	// A FLINT C function has its output first and reads the rest, so it can be called directly on our
+	// types: the output has to be one of them, the other arguments are read only (const is accepted,
+	// and an argument that is not a Flint type, an exponent say, passes through). FLINT's aliasing
+	// rules apply. Whatever the function returns comes back too: most of them return void, a few
+	// return a status after writing their output (fmpz_divides, fmpq_reconstruct_fmpz).
+	template <typename T> constexpr decltype(auto) flint_arg(T& x) {
+		if constexpr (Flint_type<std::remove_cvref_t<T>>)
+			return x.data();
+		else
+			return (x);
+	}
+
+	template <typename F, Flint_type Out, typename... A>
+	auto call_flint(F&& f, Out& out, const A&... args) {
+		return std::forward<F>(f)(out.data(), flint_arg(args)...);
+	}
+
+	// the same for a function that only reads (fmpz_fits_si, fmpz_get_si): nothing is written, the
+	// result is whatever it returns. With an output first the overload above is the better match.
+	template <typename F, typename... A>
+	auto call_flint(F&& f, const A&... args) {
+		return std::forward<F>(f)(flint_arg(args)...);
+	}
 
 	template <typename T>
 	T& operator<< (T& os, const int_t& i) {
@@ -410,10 +421,11 @@ namespace Flint {
 		return os;
 	}
 
-	template <typename T, Flint_type S> S operator+(const T r, const S& c) { return c + r; }
-	template <typename T, Flint_type S> S operator-(const T r, const S& c) { return (-c) + r; }
-	template <typename T, Flint_type S> S operator*(const T r, const S& c) { return c * r; }
-	template <builtin_number T, Flint_type S> S operator/(const T r, const S& c) { return (r == 1 ? c.inv() : S(r) / c); }
+	template <builtin_integral T, Flint_type S> S operator+(const T r, const S& c) { return c + r; }
+	template <builtin_integral T, Flint_type S> S operator-(const T r, const S& c) { return (-c) + r; }
+	template <builtin_integral T, Flint_type S> S operator*(const T r, const S& c) { return c * r; }
+	template <builtin_integral T> rat_t operator/(const T r, const rat_t& c) { return (r == 1 ? c.inv() : rat_t(r) / c); }
+	template <builtin_integral T> rat_t operator/(const T r, const int_t& c) { return rat_t(r) / c; }
 	template <typename T, Flint_type S> S pow(const S& c, const T& r) { return c.pow(r); }
 
 	inline rat_t operator/(const int_t& r, const int_t& c) {
@@ -493,6 +505,31 @@ namespace Flint {
 		fmpz_CRT(&result._data, &r1._data, &m1._data, (fmpz*)&r2._data, (fmpz*)&m2._data, 0);
 		return result;
 	}
+
+#ifdef USE_MIMALLOC
+	static void* mi_gmp_realloc(void* ptr, size_t old_size, size_t new_size) {
+		void* new_ptr = mi_realloc(ptr, new_size);
+		return new_ptr;
+	}
+
+	static void mi_gmp_free(void* ptr, size_t size) { mi_free(ptr); }
+#endif
+
+	// set memory functions for flint
+	inline void set_memory_functions() {
+#ifdef USE_MIMALLOC
+		mp_set_memory_functions(&mi_malloc, &mi_gmp_realloc, &mi_gmp_free);
+		__flint_set_memory_functions(&mi_malloc, &mi_calloc, &mi_realloc, &mi_free);
+#endif
+	}
+
+	// clear flint's cache:
+	// usually it's not necessary to call this function for one-time computation,
+	// just returning the main function and leaving the memory cleanup to OS.
+	// If one wants make some memory leak analyzer happy, 
+	// just call this function at the end of main function.
+	// Note: double calling this function may cause problems!
+	inline void clear_cache() { flint_cleanup_master(); }
 } // namespace Flint
 
 namespace SparseRREF {
@@ -528,6 +565,8 @@ namespace SparseRREF {
 	// scalar
 	using Flint::rat_t;
 	using Flint::int_t;
+	// so that a call with only raw fmpz/fmpq arguments (which cannot reach Flint by ADL) is found too
+	using Flint::call_flint;
 
 	// TODO: avoid copy
 	static inline std::string scalar_to_str(const rat_t& a) { return a.get_str(10); }
@@ -536,9 +575,7 @@ namespace SparseRREF {
 
 	// arithmetic
 
-	static inline ulong scalar_neg(const ulong b, const field_t& field) {
-		return field.get_prime() - b;
-	}
+	static inline ulong scalar_neg(const ulong b, const field_t& field) { return _nmod_sub(0, b, field.mod); }
 	static inline int_t scalar_neg(const int_t& b, const field_t& field) { return -b; }
 	static inline rat_t scalar_neg(const rat_t& b, const field_t& field) { return -b; }
 
