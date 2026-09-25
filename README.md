@@ -169,7 +169,7 @@ rref = SparseRREF[mat, Modulus -> p, "Method" -> "Right"];
 
 To use this package, you have to compile [sprreflink.cpp](sprreflink.cpp) to a shared library (`sprreflink.dll` on Windows, `sprreflink.so` on Linux, `sprreflink.dylib` on macOS) in the same directory with [SparseRREF.wl](SparseRREF.wl).
 
-The rational entry points exchange the matrix with the kernel as WXF: the package sends `BinarySerialize[mat]` (a `ByteArray`) and reads the answer back with `BinaryDeserialize`, using the same SparseArray layout as the `.wxf` files described above. The integer mod `p` entry points pass the `SparseArray` directly instead. Since both APIs speak WXF, a matrix can be moved between them, and to and from a file, with `BinarySerialize` / `BinaryDeserialize`.
+The rational entry points exchange the matrix with the kernel as WXF: the package sends `BinarySerialize[mat]` (a `ByteArray`) and reads the answer back with `BinaryDeserialize`, using the same SparseArray layout as the `.wxf` files described above. Since both APIs speak WXF, a matrix can be moved between them, and to and from a file, with `BinarySerialize` / `BinaryDeserialize`.
 
 See comments in [SparseRREF.wl](SparseRREF.wl) for more details.
 

@@ -33,10 +33,10 @@
       False: submatrix is upper triangular (a kernel is requested: the backward substitution
         is then performed anyway, since the kernel is read off the identity submatrix).
     - "Threads": number of threads (Integer >= 0, with 0 meaning automatic).
-    - "Verbose": True | False.
-    - "PrintStep": Integer (print progress every n steps).
+    - "Verbose": True | False (only decides whether the progress is shown; see "LogStream").
+    - "PrintStep": Integer (print progress every n steps, and the interrupt is checked then).
     - "LogStream":
-      None: progress output is written to the kernel's stdout (default).
+      None: nothing is shown (default).
       Automatic: progress lines are printed in this session as they are produced.
       "Dynamic": progress is shown in a single temporary output cell, which is refreshed
         a few times per second while the computation runs. Use this in a notebook: the
@@ -44,9 +44,9 @@
         is what makes the front end sluggish. Without a front end "Dynamic" falls back to
         Automatic.
       stream: progress lines are written to the OutputStream stream as they are produced.
-      All but None also collect the lines, which SparseRREFLog[] then returns; they imply
-      "Verbose" -> True, since the library only reports when it is verbose.
-      The collected lines are kept even if the computation is aborted.
+      The lines are collected either way, and SparseRREFLog[] returns them; the collected
+      lines are kept even if the computation is aborted.
+      Alt+. stops the rref at any moment, whatever "Verbose" and "LogStream" say.
     
   SparseRREFLog[]
     Returns the log of the most recent SparseRREF call that used the "LogStream"
@@ -184,6 +184,7 @@ SyntaxInformation[SparseRREF] = {"ArgumentsPattern" -> {_, OptionsPattern[]}}
 SparseRREF::findlib = "SparseRREF library \"`1`\" not found at `2`";
 SparseRREF::optionvalue = "Invalid SparseRREF option value: `1` -> `2`. Allowed values: `3`";
 SparseRREF::rettype = "SparseRREF should return SparseArray or List, but returned: `1`";
+SparseRREF::lib = "The library reported: `1`";
 
 
 SparseRREFLog::usage =
@@ -297,7 +298,7 @@ modRREFLibFunction =
     $sparseRREFLib,
     "sprref_mod_rref",
     {
-      {LibraryDataType[SparseArray], "Constant"},
+      {LibraryDataType[ByteArray], "Constant"},
       Integer,
       Integer,
       Integer,
@@ -309,6 +310,32 @@ modRREFLibFunction =
     },
     {LibraryDataType[ByteArray], Automatic}
   ];
+
+(* The rref runs as an asynchronous task: the library returns a task id at once, the computation goes
+   on a thread the kernel made for it, and the Wolfram side waits in the language, which is what makes
+   Alt+. work at any time. Kernels without asynchronous tasks fall back to the exports above. *)
+quietLoad[name_, arguments_, result_] := Quiet @ Check[LibraryFunctionLoad[$sparseRREFLib, name, arguments, result], $Failed];
+
+ratRREFTaskFunction =
+  quietLoad[
+    "sprref_rat_rref_task",
+    {{LibraryDataType[ByteArray], "Constant"}, Integer, Integer, True | False, Integer, Integer},
+    Integer
+  ];
+
+modRREFTaskFunction =
+  quietLoad[
+    "sprref_mod_rref_task",
+    {{LibraryDataType[ByteArray], "Constant"}, Integer, Integer, Integer, True | False, Integer, Integer},
+    Integer
+  ];
+
+(* A finished task parks its bytes in the library; the "done" event carries a token and this fetches
+   them, so a large result is not unpacked into a list of integers on the way. *)
+ratRREFTakeResultFunction =
+  quietLoad["sprref_take_result", {Integer}, {LibraryDataType[ByteArray], Automatic}];
+
+$sprrefWait = 0.02; (* how often the wait for a task checks whether it is done *)
 
 
 ratMatMulLibFunction =
@@ -562,6 +589,41 @@ SparseRREF[mat_SparseArray, opts : OptionsPattern[] ] :=
 
 SparseRREFLog[] := StringRiffle[Flatten[$logLines], "\n"];
 
+(* Send the task and wait for its events here, in the language: an aborted wait (Alt+.) is the
+   interrupt, because the cleanup removes the task and the runner notices that at its next progress
+   line. Nothing of ours ever asks the kernel from a thread of our own: such a call sometimes never
+   returns, and then whoever waits for that thread waits forever. *)
+runRREFTask[lib_, args_] :=
+  Module[
+    {$task = Null, $done = False, $failed = False, $payload = None, $message = ""},
+    Internal`WithLocalSettings[
+      $task = Internal`CreateAsynchronousTask[
+        lib,
+        args,
+        Function[{task, event, data},
+          Switch[event,
+            "log", If[Length[data] >= 1, sprrefLogPush[First[data]]],
+            "done", $payload = First[data]; $done = True,
+            "error", $message = If[Length[data] >= 1, First[data], "unknown"]; $failed = True; $done = True,
+            _, Null
+          ];
+          Null
+        ]
+      ],
+      (* a task that could not be started never raises an event *)
+      If[!MatchQ[$task, _AsynchronousTaskObject],
+        $message = "the asynchronous task could not be started"; $failed = True; $done = True];
+      While[!$done, Pause[$sprrefWait]],
+      (* disposing of the task is what stops an aborted computation *)
+      If[MatchQ[$task, _AsynchronousTaskObject], Quiet @ RemoveAsynchronousTask[$task]]
+    ];
+    Which[
+      $failed, Message[SparseRREF::lib, $message]; $Failed,
+      $done, With[{$bytes = ratRREFTakeResultFunction[$payload]},
+        If[FailureQ[$bytes], Message[SparseRREF::lib, "the result could not be fetched"]; $Failed, $bytes]],
+      True, $Failed
+    ]
+  ];
 ratRREF[
     mat_SparseArray,
     outputMode_?IntegerQ,
@@ -572,15 +634,15 @@ ratRREF[
     printStep_?IntegerQ,
     log_?BooleanQ
   ] :=
-  BinaryDeserialize @ ratRREFLibFunction[
-    BinarySerialize[mat],
-    outputMode,
-    method,
-    backwardSubstitution,
-    threads,
-    verbose,
-    printStep,
-    log
+  If[ratRREFTaskFunction === $Failed,
+    BinaryDeserialize @ ratRREFLibFunction[
+      BinarySerialize[mat], outputMode, method, backwardSubstitution, threads, verbose, printStep, log
+    ],
+    With[{$bytes = runRREFTask[
+        ratRREFTaskFunction,
+        {BinarySerialize[mat], outputMode, method, backwardSubstitution, threads, printStep}]},
+      If[FailureQ[$bytes], $Failed, BinaryDeserialize[$bytes]]
+    ]
   ];
 
 modRREF[
@@ -594,16 +656,15 @@ modRREF[
     printStep_?IntegerQ,
     log_?BooleanQ
   ] :=
-  BinaryDeserialize @ modRREFLibFunction[
-    mat,
-    p,
-    outputMode,
-    method,
-    backwardSubstitution,
-    threads,
-    verbose,
-    printStep,
-    log
+  If[modRREFTaskFunction === $Failed,
+    BinaryDeserialize @ modRREFLibFunction[
+      BinarySerialize[mat], p, outputMode, method, backwardSubstitution, threads, verbose, printStep, log
+    ],
+    With[{$bytes = runRREFTask[
+        modRREFTaskFunction,
+        {BinarySerialize[mat], p, outputMode, method, backwardSubstitution, threads, printStep}]},
+      If[FailureQ[$bytes], $Failed, BinaryDeserialize[$bytes]]
+    ]
   ];
 
 
