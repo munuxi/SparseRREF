@@ -410,38 +410,63 @@ namespace SparseRREF {
 			std::cerr << "Error: sparse_tensor_read: the row pointers have the wrong length" << std::endl;
 			return st();
 		}
+		if (rowptr[0] != 0) {
+			std::cerr << "Error: sparse_tensor_read: the first row pointer is not zero" << std::endl;
+			return st();
+		}
+		// the row pointers have to be non-decreasing and every coordinate has to be inside its
+		// dimension: a bogus index would be carried into the tensor -- and, read as a matrix, into
+		// the rows of the matrix -- and corrupt whatever walks it later
+		for (size_t i = 0; i < dims[0]; i++) {
+			if (rowptr[i] > rowptr[i + 1]) {
+				std::cerr << "Error: sparse_tensor_read: the row pointers are not increasing" << std::endl;
+				return st();
+			}
+		}
 		size_t nz = rowptr.back();
 
+		if (nz == 0) {
+			size_t pos = 11;
+			for (size_t part = 0; part < 2; part++) {
+				if (pos < tokens.size() && is_int_array(tokens[pos]) && tokens[pos].dimensions[1] == 0)
+					pos++;
+				else if (pos + 1 < tokens.size() && tokens[pos].type == WXF_PARSER::WXF_HEAD::func &&
+					tokens[pos].length == 0 && tokens[pos + 1].type == WXF_PARSER::WXF_HEAD::symbol &&
+					tokens[pos + 1].get_string_view() == "List")
+					pos += 2;
+				else {
+					std::cerr << "Error: sparse_tensor_read: invalid empty column indices or values" << std::endl;
+					return st();
+				}
+			}
+			if (pos != tokens.size()) {
+				std::cerr << "Error: sparse_tensor_read: trailing tokens after SparseArray" << std::endl;
+				return st();
+			}
+		}
+		else {
+			// colindex is tokens[11]
+			if (!is_int_array(tokens[11])) {
+				std::cerr << "Error: sparse_tensor_read: the column indices are not an integer array" << std::endl;
+				return st();
+			}
+			if (WXF_PARSER::size_of_arr_num_type(tokens[11].dimensions[0]) > sizeof(index_t)) {
+				std::cerr << "Error: sparse_tensor_read: the type of index is not enough for colindex" << std::endl;
+				return st();
+			}
+			if (tokens[11].dimensions[1] != nz * (dims.size() - 1)) {
+				std::cerr << "Error: sparse_tensor_read: the column indices have the wrong length" << std::endl;
+				return st();
+			}
+		}
 		st tensor(dims, nz);
 		tensor.data.rowptr = std::move(rowptr);
 		if (nz == 0)
 			return tensor;
 
-		// colindex is tokens[11]
-		if (!is_int_array(tokens[11])) {
-			std::cerr << "Error: sparse_tensor_read: the column indices are not an integer array" << std::endl;
-			return st();
-		}
-		if (WXF_PARSER::size_of_arr_num_type(tokens[11].dimensions[0]) > sizeof(index_t)) {
-			std::cerr << "Error: sparse_tensor_read: the type of index is not enough for colindex" << std::endl;
-			return st();
-		}
-		if (tokens[11].dimensions[1] != nz * (dims.size() - 1)) {
-			std::cerr << "Error: sparse_tensor_read: the column indices have the wrong length" << std::endl;
-			return st();
-		}
 		// mma is 1-based for colindex
 		copy_modify_arr(tokens[11], tensor.data.colptr, [](auto v) { return v - 1; });
 
-		// the row pointers have to be non-decreasing and every coordinate has to be inside its
-		// dimension: a bogus index would be carried into the tensor -- and, read as a matrix, into
-		// the rows of the matrix -- and corrupt whatever walks it later
-		for (size_t i = 0; i < dims[0]; i++) {
-			if (tensor.data.rowptr[i] > tensor.data.rowptr[i + 1]) {
-				std::cerr << "Error: sparse_tensor_read: the row pointers are not increasing" << std::endl;
-				return st();
-			}
-		}
 		for (size_t j = 0; j < nz; j++) {
 			auto ptr = tensor.data.colptr + j * (dims.size() - 1);
 			for (size_t k = 0; k + 1 < dims.size(); k++) {
@@ -480,7 +505,7 @@ namespace SparseRREF {
 		// the other is vals
 		if (tokens[12].type == WXF_PARSER::WXF_HEAD::array ||
 			tokens[12].type == WXF_PARSER::WXF_HEAD::narray) {
-			if (tokens[12].dimensions[1] != nz) {
+			if (tokens.size() != 13 || tokens[12].dimensions[1] != nz) {
 				std::cerr << "Error: sparse_tensor_read: the values have the wrong length" << std::endl;
 				return st();
 			}
@@ -500,7 +525,7 @@ namespace SparseRREF {
 		}
 		else {
 			// it is a list
-			if (tokens[12].type != WXF_PARSER::WXF_HEAD::func ||
+			if (tokens.size() < 14 || tokens[12].type != WXF_PARSER::WXF_HEAD::func ||
 				tokens[12].length != nz ||
 				tokens[13].type != WXF_PARSER::WXF_HEAD::symbol ||
 				tokens[13].get_string_view() != "List") {
@@ -510,7 +535,11 @@ namespace SparseRREF {
 
 			size_t pos = 14;
 			T* vals = tensor.data.valptr;
-			while (pos < tokens.size()) {
+			for (size_t k = 0; k < nz; k++) {
+				if (pos >= tokens.size()) {
+					std::cerr << "Error: sparse_tensor_read: too few values" << std::endl;
+					return st();
+				}
 				auto& token = tokens[pos];
 				T val;
 				switch (token.type) {
@@ -534,12 +563,19 @@ namespace SparseRREF {
 					}
 					break;
 				case WXF_PARSER::WXF_HEAD::func: {
+					if (pos + 3 >= tokens.size()) {
+						std::cerr << "Error: sparse_tensor_read: wrong format in SparseArray" << std::endl;
+						return sparse_mat<T, index_t>();
+					}
 					auto ntoken = tokens[pos + 1];
-					if (ntoken.get_string_view() == "Rational") {
-						if (pos + 3 >= tokens.size()) {
-							std::cerr << "Error: sparse_tensor_read: wrong format in SparseArray" << std::endl;
-							return sparse_mat<T, index_t>();
-						}
+					auto is_integer = [](const WXF_PARSER::Token& t) {
+						return t.type == WXF_PARSER::WXF_HEAD::i8 || t.type == WXF_PARSER::WXF_HEAD::i16 ||
+							t.type == WXF_PARSER::WXF_HEAD::i32 || t.type == WXF_PARSER::WXF_HEAD::i64 ||
+							t.type == WXF_PARSER::WXF_HEAD::bigint;
+						};
+					if (token.length == 2 && ntoken.type == WXF_PARSER::WXF_HEAD::symbol &&
+						ntoken.get_string_view() == "Rational" &&
+						is_integer(tokens[pos + 2]) && is_integer(tokens[pos + 3])) {
 
 						int_t n_1 = get_int_from_tv(tokens[pos + 2]);
 						int_t d_1 = get_int_from_tv(tokens[pos + 3]);
@@ -567,6 +603,10 @@ namespace SparseRREF {
 				*vals = val;
 				vals++;
 				pos++;
+			}
+			if (pos != tokens.size()) {
+				std::cerr << "Error: sparse_tensor_read: trailing tokens after SparseArray" << std::endl;
+				return st();
 			}
 		}
 		

@@ -467,6 +467,8 @@ EXTERN_C DLLEXPORT int sprref_rat_tensor_contract(WolframLibraryData ld, mint Ar
 		{
 			WXF_PARSER::Parser parserA(in_strA, lengthA);
 			parserA.parse();
+			if (!WXF_PARSER::parse_ok(parserA.err))
+				return LIBRARY_FUNCTION_ERROR;
 			auto A = sparse_tensor_read_wxf<rat_t, int>(parserA.tokens, F, pool_ptr);
 			tensorA = std::move(A);
 		}
@@ -474,6 +476,8 @@ EXTERN_C DLLEXPORT int sprref_rat_tensor_contract(WolframLibraryData ld, mint Ar
 		{
 			WXF_PARSER::Parser parserB(in_strB, lengthB);
 			parserB.parse();
+			if (!WXF_PARSER::parse_ok(parserB.err))
+				return LIBRARY_FUNCTION_ERROR;
 			auto B = sparse_tensor_read_wxf<rat_t, int>(parserB.tokens, F, pool_ptr);
 			tensorB = std::move(B);
 		}
@@ -578,12 +582,16 @@ EXTERN_C DLLEXPORT int sprref_rat_matmul(WolframLibraryData ld, mint Argc, MArgu
 		{
 			WXF_PARSER::Parser parserA(in_strA, lengthA);
 			parserA.parse();
+			if (!WXF_PARSER::parse_ok(parserA.err))
+				return LIBRARY_FUNCTION_ERROR;
 			matA = sparse_mat_read_wxf<rat_t, int>(parserA.tokens, F);
 		}
 
 		{
 			WXF_PARSER::Parser parserB(in_strB, lengthB);
 			parserB.parse();
+			if (!WXF_PARSER::parse_ok(parserB.err))
+				return LIBRARY_FUNCTION_ERROR;
 			matB = sparse_mat_read_wxf<rat_t, int>(parserB.tokens, F);
 		}
 
@@ -857,6 +865,8 @@ EXTERN_C DLLEXPORT int sprref_mod_rref(WolframLibraryData ld, mint Argc, MArgume
 
 	WXF_PARSER::Parser parser(in_str, length);
 	parser.parse();
+	if (!WXF_PARSER::parse_ok(parser.err))
+		return LIBRARY_FUNCTION_ERROR;
 	auto mat = sparse_mat_read_wxf<ulong, int>(parser.tokens, F);
 	if (mat.nrow == 0 && mat.ncol == 0) // not a matrix, or not readable
 		return LIBRARY_FUNCTION_ERROR;
@@ -977,6 +987,10 @@ void mod_rref_task_runner(mint id, void* varg) {
 
 	WXF_PARSER::Parser parser(d.bytes.data(), d.bytes.size());
 	parser.parse();
+	if (!WXF_PARSER::parse_ok(parser.err)) {
+		raise_error(d.io, id, "rref: the input bytes are not a valid WXF array");
+		return;
+	}
 	auto mat = sparse_mat_read_wxf<ulong, int>(parser.tokens, F);
 
 	current_option() = opt;
@@ -1091,6 +1105,8 @@ EXTERN_C DLLEXPORT int sprref_rat_rref(WolframLibraryData ld, mint Argc, MArgume
 
 	WXF_PARSER::Parser parser(in_str, length);
 	parser.parse();
+	if (!WXF_PARSER::parse_ok(parser.err))
+		return LIBRARY_FUNCTION_ERROR;
 	auto mat = sparse_mat_read_wxf<rat_t, int>(parser.tokens, F);
 
 	rref_option_t opt;
@@ -1180,6 +1196,10 @@ void rat_rref_task_runner(mint id, void* varg) {
 
 	WXF_PARSER::Parser parser(d.bytes.data(), d.bytes.size());
 	parser.parse();
+	if (!WXF_PARSER::parse_ok(parser.err)) {
+		raise_error(d.io, id, "rref: the input bytes are not a valid WXF array");
+		return;
+	}
 	auto mat = sparse_mat_read_wxf<rat_t, int>(parser.tokens, F);
 
 	current_option() = opt;
@@ -1290,6 +1310,8 @@ EXTERN_C DLLEXPORT int sprref_rat_matinv(WolframLibraryData ld, mint Argc, MArgu
 
 		WXF_PARSER::Parser parser(in_str, length);
 		parser.parse();
+		if (!WXF_PARSER::parse_ok(parser.err))
+			return LIBRARY_FUNCTION_ERROR;
 		auto mat = sparse_mat_read_wxf<rat_t, int>(parser.tokens, F);
 
 		rref_option_t opt;

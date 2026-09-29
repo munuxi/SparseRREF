@@ -394,6 +394,7 @@ namespace WXF_PARSER {
 		Encoder& push_array(const std::vector<size_t>& dimension_array, const std::span<T> data, WXF_HEAD type, uint8_t num_type, F&& func = std::identity{}) {
 			// backup current size
 			size_t old_size = buffer.size();
+			using value_t = std::remove_cvref_t<std::invoke_result_t<F&, const T&>>;
 
 			// [array_type, num_type, rank, dimensions..., data...]
 			auto all_len = push_array_info(dimension_array, type, num_type);
@@ -408,7 +409,7 @@ namespace WXF_PARSER {
 			// the header reports size_of_arr_num_type(num_type) bytes per element, so
 			// the data written for it has to match; push_array_data takes care of the
 			// integral cases by casting, and rejects num_types it cannot serve
-			if constexpr (std::is_integral_v<T>) {
+			if constexpr (std::is_integral_v<value_t>) {
 				const bool supported_num_type = num_type <= 3 || (num_type >= 16 && num_type <= 19);
 				if (!supported_num_type) {
 					std::cerr << "Encoder::push_array: unsupported integer array num_type "
@@ -419,11 +420,11 @@ namespace WXF_PARSER {
 			}
 			// for the non-integral cases the width has to match exactly, because
 			// push_array_data writes the elements as they are
-			if constexpr (!std::is_integral_v<T>) {
-				if (size_of_arr_num_type(num_type) != sizeof(T)) {
+			if constexpr (!std::is_integral_v<value_t>) {
+				if (size_of_arr_num_type(num_type) != sizeof(value_t)) {
 					std::cerr << "Encoder::push_array: num_type " << static_cast<int>(num_type)
 						<< " means " << size_of_arr_num_type(num_type) << " bytes per element, but "
-						<< sizeof(T) << " bytes were given." << std::endl;
+						<< sizeof(value_t) << " bytes were given." << std::endl;
 					buffer.resize(old_size);
 					return *this;
 				}
