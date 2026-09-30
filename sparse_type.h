@@ -11,6 +11,7 @@
 #define SPARSE_TYPE_H
 
 #include <limits>
+#include <numeric>
 
 #include "sparse_rref.h"
 #include "scalar.h"
@@ -287,10 +288,14 @@ namespace SparseRREF {
 		// sparse_vec.take({start, end}) returns a sparse_vec with elements indexed in [start, end)
 		// elements in the resulting sparse_vec are reindexed in [0, end - start)
 		sparse_vec<T, index_t> take(const std::pair<index_t, index_t>& span, const bool reserve_nnz = true) const {
-			if (span.first < 0 || span.second < 0)
-				throw std::invalid_argument("sparse_vec.take: expect non-negative indices.");
-			if (span.first > span.second)
-				throw std::invalid_argument("sparse_vec.take: invalid span.");
+			if (span.first < 0 || span.second < 0) {
+				report_error("sparse_vec.take: expect non-negative indices.");
+				return {};
+			}
+			if (span.first > span.second) {
+				report_error("sparse_vec.take: invalid span.");
+				return {};
+			}
 
 			sparse_vec<T, index_t> result;
 			if (reserve_nnz)
@@ -679,10 +684,12 @@ namespace SparseRREF {
 		// sparse_mat.take({start, end}) returns a sparse_mat with rows indexed in [start, end)
 		sparse_mat<T, index_t> take(const std::pair<size_t, size_t>& span, thread_pool* pool = nullptr) const {
 			if (span.second > nrow) {
-				throw std::out_of_range("sparse_mat.take: [start, end) out of [0, nrow).");
+				report_error("sparse_mat.take: [start, end) out of [0, nrow).");
+				return {};
 			}
 			if (span.first > span.second) {
-				throw std::invalid_argument("sparse_mat.take: invalid span.");
+				report_error("sparse_mat.take: invalid span.");
+				return {};
 			}
 
 			sparse_mat<T, index_t> res(span.second - span.first, ncol);
@@ -702,19 +709,27 @@ namespace SparseRREF {
 		// sparse_mat.take(levelspec, {start, end}) returns a sparse_mat whose elements have the levelspec-th index in range [start, end)
 		// elements in the resulting sparse_mat have their levelspec-th indices reindexed in [0, end - start)
 		sparse_mat<T, index_t> take(const size_t levelspec, const std::pair<index_t, index_t>& span, thread_pool* pool = nullptr) const {
-			if (span.first < 0 || span.second < 0)
-				throw std::invalid_argument("sparse_mat.take: expect non-negative indices.");
-			if (span.first > span.second)
-				throw std::invalid_argument("sparse_mat.take: invalid span.");
-			if (levelspec > 1)
-				throw std::invalid_argument("sparse_mat.take: levelspec must be 0 or 1.");
+			if (span.first < 0 || span.second < 0) {
+				report_error("sparse_mat.take: expect non-negative indices.");
+				return {};
+			}
+			if (span.first > span.second) {
+				report_error("sparse_mat.take: invalid span.");
+				return {};
+			}
+			if (levelspec > 1) {
+				report_error("sparse_mat.take: levelspec must be 0 or 1.");
+				return {};
+			}
 
 			if (levelspec == 0)
 				return take(span, pool);
 
 			// then levelspec == 1
-			if (span.second > ncol)
-				throw std::out_of_range("sparse_mat.take: [start, end) out of [0, ncol).");
+			if (span.second > ncol) {
+				report_error("sparse_mat.take: [start, end) out of [0, ncol).");
+				return {};
+			}
 			
 			sparse_mat<T, index_t> res(nrow, span.second - span.first);
 			if (pool == nullptr) {
@@ -736,7 +751,7 @@ namespace SparseRREF {
 			const std::pair<size_t, size_t>& colspan, const bool is_binary = true) const {
 
 			if (colspan.second < colspan.first || rowspan.second < rowspan.first) {
-				std::cerr << "sparse_mat.submat: invalid span." << std::endl;
+				report_error("sparse_mat.submat: invalid span.");
 				return sparse_mat<T, index_t>();
 			}
 
@@ -823,6 +838,43 @@ namespace SparseRREF {
 			return max_height;
 		}
 	};
+
+	// The bookkeeping that every row wise pass of the tensor shares: the entries of a row are counted
+	// first, in a vector (one count per row) or in one counter per thread or per block of the row, and
+	// the counts then become the rowptr and the total nnz of the result.
+
+	// the total number of entries of a per row count
+	inline size_t total_counts(const std::vector<size_t>& counts) {
+		return std::accumulate(counts.begin(), counts.end(), (size_t)0);
+	}
+
+	// every row's count, summed from the counters it was split over. A counter vector may hold more
+	// entries than there are rows (it is indexed by the value of a coordinate, not by the row), so
+	// nrow says how many rows to look at
+	inline void row_totals(const std::vector<std::vector<size_t>>& block_counts, std::vector<size_t>& counts, const size_t nrow) {
+		counts.resize(nrow);
+		for (size_t i = 0; i < nrow; i++)
+			counts[i] = std::accumulate(block_counts[i].begin(), block_counts[i].end(), (size_t)0);
+	}
+
+	// rowptr from the count of every row; rowptr[0] has to be 0 already
+	inline void rowptr_from_counts(const std::vector<size_t>& counts, std::vector<size_t>& rowptr) {
+		for (size_t i = 0; i < counts.size(); i++)
+			rowptr[i + 1] = rowptr[i] + counts[i];
+	}
+
+	// the same, with every row's count split over its counters (and the same caveat as row_totals:
+	// there may be more counters than there are rows)
+	inline void rowptr_from_block_counts(const std::vector<std::vector<size_t>>& block_counts, std::vector<size_t>& rowptr, const size_t nrow) {
+		for (size_t i = 0; i < nrow; i++)
+			rowptr[i + 1] = rowptr[i] + std::accumulate(block_counts[i].begin(), block_counts[i].end(), (size_t)0);
+	}
+
+	// prefix sums in place, when rowptr already holds the count of every row
+	inline void rowptr_prefix_sum(std::vector<size_t>& rowptr, const size_t nrow) {
+		for (size_t i = 0; i < nrow; i++)
+			rowptr[i + 1] += rowptr[i];
+	}
 
 	// CSR format for sparse tensor
 	template <typename T, typename index_t> struct sparse_tensor_struct {
@@ -1201,7 +1253,7 @@ namespace SparseRREF {
 		}
 
 		/**
-    	 * @brief Traverse tensor rows in the range `[row_start, row_end)` and apply function `func` to each entry using multi-threading. The function `row_init` is called before processing each row, and the function `block_init` is called before processing each block within a row. This will also setup a vector of `BS::blocks<size_t>` for each row to facilitate further parallel operations.
+    	 * @brief Traverse tensor rows in the range `[row_start, row_end)` and apply function `func` to each entry using multi-threading. The function `row_init` is called before processing each row, and the function `block_init` is called before processing each block within a row. This will also setup a vector of `entry_blocks_t` for each row to facilitate further parallel operations.
     	 *
     	 * @tparam F1 The type of the traversal function.
     	 * @tparam F2 The type of the row initialization function.
@@ -1209,28 +1261,30 @@ namespace SparseRREF {
     	 * @param row_start The starting row index (inclusive).
 		 * @param row_end The ending row index (exclusive).
 		 * @param func The traversal function to apply to each entry. Takes at least two `size_t` arguments: row index and entry index. May also receive the return values of `row_init` and `block_init` (if not void) as additional arguments.
-		 * @param row_init The row initialization function to be called before processing each row. Takes two arguments: row index and `BS::blocks<size_t>` for that row.
+		 * @param row_init The row initialization function to be called before processing each row. Takes two arguments: row index and `entry_blocks_t` for that row.
 		 * @param block_init The block initialization function to be called before processing each block within a row. Takes at least two arguments: row index and block index. May also receive the return value of `row_init` (if not void) as an additional argument.
 		 * @param pool Pointer to a thread pool for parallel execution. Must not be `nullptr`.
-		 * @return A vector of `BS::blocks<size_t>` for each row in the specified range.
+		 * @return A vector of `entry_blocks_t` for each row in the specified range.
     	 */
 		template <typename F1, typename F2, typename F3>
-		inline std::vector<BS::blocks<size_t>> traverse_setup_blocks(const size_t row_start, const size_t row_end, F1&& func, F2&& row_init, F3&& block_init, thread_pool* pool) const {
-			std::vector<BS::blocks<size_t>> row_blocks;
-			if (pool == nullptr)
-				throw std::invalid_argument("sparse_tensor_struct.traverse_setup_blocks: thread pool is required for setting up blocks.");
+		inline std::vector<entry_blocks_t> traverse_setup_blocks(const size_t row_start, const size_t row_end, F1&& func, F2&& row_init, F3&& block_init, thread_pool* pool) const {
+			std::vector<entry_blocks_t> row_blocks;
+			if (pool == nullptr) {
+				report_error("sparse_tensor_struct.traverse_setup_blocks: thread pool is required for setting up blocks.");
+				return {};
+			}
 
-			using F2_return_type = std::invoke_result_t<F2, size_t, BS::blocks<size_t>>;
+			using F2_return_type = std::invoke_result_t<F2, size_t, entry_blocks_t>;
 			
 			auto nthread = pool->get_thread_count();
 			for (size_t i = row_start; i < row_end; i++) {
 				// separate row elements into blocks
-				const BS::blocks<size_t> blks(rowptr[i], rowptr[i + 1], nthread);
+				const entry_blocks_t blks(rowptr[i], rowptr[i + 1], nthread);
 				row_blocks.push_back(blks);
 				if constexpr (std::is_void_v<F2_return_type>) {
 					using F3_return_type = std::invoke_result_t<F3, size_t, size_t>;
 					row_init(i, blks);
-					pool->detach_sequence(0, blks.get_num_blocks(), [&](size_t blk) {
+					pool->detach_sequence(0, blks.nblk, [&](size_t blk) {
 						if constexpr (std::is_void_v<F3_return_type>) {
 							static_assert(std::is_invocable_v<F1, size_t, size_t, size_t>, "sparse_tensor_struct.traverse_setup_blocks: func must be invocable with (size_t, size_t, size_t) when both row_init and block_init return void.");
 							block_init(i, blk);
@@ -1253,9 +1307,9 @@ namespace SparseRREF {
 					using F2_lvalue_type = std::conditional_t<std::is_reference_v<F2_return_type>, F2_return_type,std::add_lvalue_reference_t<F2_return_type>>;
 					using F3_return_type = std::invoke_result_t<F3, size_t, size_t, F2_lvalue_type>;
 					auto row_data = row_init(i, blks);
-					pool->detach_sequence(0, blks.get_num_blocks(), [&](size_t blk) {
+					pool->detach_sequence(0, blks.nblk, [&](size_t blk) {
 						if constexpr (std::is_void_v<std::invoke_result_t<F3, size_t, size_t, F2_lvalue_type>>) {
-							static_assert(std::is_invocable_v<F1, size_t, size_t, size_t, std::invoke_result_t<F2, size_t, BS::blocks<size_t>>>, "sparse_tensor_struct.traverse_setup_blocks: func must be invocable with (size_t, size_t, size_t, row_init return type) when block_init returns void and row_init does not.");
+							static_assert(std::is_invocable_v<F1, size_t, size_t, size_t, std::invoke_result_t<F2, size_t, entry_blocks_t>>, "sparse_tensor_struct.traverse_setup_blocks: func must be invocable with (size_t, size_t, size_t, row_init return type) when block_init returns void and row_init does not.");
 							block_init(i, blk, row_data);
 							for (size_t j = blks.start(blk); j < blks.end(blk); j++) {
 								func(i, j, blk, row_data);
@@ -1278,7 +1332,7 @@ namespace SparseRREF {
 		}
 
 		/**
-    	 * @brief Traverse tensor rows in the range `[row_start, row_end)` and apply function `func` to each entry using multi-threading. The function `row_init` is called before processing each row, and the function `block_init` is called before processing each block within a row. This will use the given `std::span<BS::blocks<size_t>>` for multi-threading.
+    	 * @brief Traverse tensor rows in the range `[row_start, row_end)` and apply function `func` to each entry using multi-threading. The function `row_init` is called before processing each row, and the function `block_init` is called before processing each block within a row. This will use the given `std::span<entry_blocks_t>` for multi-threading.
     	 *
     	 * @tparam F1 The type of the traversal function.
     	 * @tparam F2 The type of the row initialization function.
@@ -1286,26 +1340,28 @@ namespace SparseRREF {
     	 * @param row_start The starting row index (inclusive).
 		 * @param row_end The ending row index (exclusive).
 		 * @param func The traversal function to apply to each entry. Takes at least two `size_t` arguments: row index and entry index. May also receive the return values of `row_init` and `block_init` (if not void) as additional arguments.
-		 * @param row_init The row initialization function to be called before processing each row. Takes two arguments: row index (`size_t`) and `BS::blocks<size_t>` for that row.
+		 * @param row_init The row initialization function to be called before processing each row. Takes two arguments: row index (`size_t`) and `entry_blocks_t` for that row.
 		 * @param block_init The block initialization function to be called before processing each block within a row. Takes at least two `size_t` arguments: row index and block index. May also receive the return value of `row_init` (if not void) as an additional argument.
-		 * @param row_blocks A `std::span<BS::blocks<size_t>>` containing the blocks for each row to be used.
+		 * @param row_blocks A `std::span<entry_blocks_t>` containing the blocks for each row to be used.
 		 * @param pool Pointer to a thread pool for parallel execution.
     	 */
 		template <typename F1, typename F2, typename F3>
-		inline void traverse_using_blocks(const size_t row_start, const size_t row_end, F1&& func, F2&& row_init, F3&& block_init, const std::span<BS::blocks<size_t>>& row_blocks, thread_pool* pool) const {
-			if (pool == nullptr)
-				throw std::invalid_argument("sparse_tensor_struct.traverse_using_blocks: thread pool is required for using blocks.");
+		inline void traverse_using_blocks(const size_t row_start, const size_t row_end, F1&& func, F2&& row_init, F3&& block_init, const std::span<entry_blocks_t>& row_blocks, thread_pool* pool) const {
+			if (pool == nullptr) {
+				report_error("sparse_tensor_struct.traverse_using_blocks: thread pool is required for using blocks.");
+				return;
+			}
 
-			using F2_return_type = std::invoke_result_t<F2, size_t, BS::blocks<size_t>>;
+			using F2_return_type = std::invoke_result_t<F2, size_t, entry_blocks_t>;
 			
 			for (size_t i = row_start; i < row_end; i++) {
-				const BS::blocks<size_t>& blks = row_blocks[i - row_start];
-				if (blks.get_num_blocks() == 0)
+				const entry_blocks_t& blks = row_blocks[i - row_start];
+				if (blks.nblk == 0)
 					continue;
 				if constexpr (std::is_void_v<F2_return_type>) {
 					using F3_return_type = std::invoke_result_t<F3, size_t, size_t>;
 					row_init(i, blks);
-					pool->detach_sequence(0, blks.get_num_blocks(), [&](size_t blk) {
+					pool->detach_sequence(0, blks.nblk, [&](size_t blk) {
 						if constexpr (std::is_void_v<F3_return_type>) {
 							static_assert(std::is_invocable_v<F1, size_t, size_t, size_t>, "sparse_tensor_struct.traverse_using_blocks: func must be invocable with (size_t, size_t, size_t) when both row_init and block_init return void.");
 							block_init(i, blk);
@@ -1328,7 +1384,7 @@ namespace SparseRREF {
 					using F2_lvalue_type = std::conditional_t<std::is_reference_v<F2_return_type>, F2_return_type,std::add_lvalue_reference_t<F2_return_type>>;
 					using F3_return_type = std::invoke_result_t<F3, size_t, size_t, F2_lvalue_type>;
 					auto row_data = row_init(i, blks);
-					pool->detach_sequence(0, blks.get_num_blocks(), [&](size_t blk) {
+					pool->detach_sequence(0, blks.nblk, [&](size_t blk) {
 						if constexpr (std::is_void_v<F3_return_type>) {
 							static_assert(std::is_invocable_v<F1, size_t, size_t, size_t, F2_lvalue_type>, "sparse_tensor_struct.traverse_using_blocks: func must be invocable with (size_t, size_t, size_t, row_init return type) when block_init returns void and row_init does not.");
 							block_init(i, blk, row_data);
@@ -1350,15 +1406,210 @@ namespace SparseRREF {
 			}			
 		}
 
+		// Row wise map: the kept entries of the rows [row_start, row_end) are counted first and then
+		// written into `B`, whose shape the caller has already set. `dest(i)` is the result row of every
+		// kept entry of the row i, `keep(i, j)` tells whether the entry (i, j) is copied and
+		// `fill(B, i, j, res)` copies it to the running index `res` of its result row: the driver owns the
+		// counters (B.rowptr holds them first, so no count vector is allocated) and `fill` only writes and
+		// increments.
+		//
+		// With a pool the entries of every row are split into blocks, so that one very long row is still
+		// filled by several threads. A row has a single result row, so all its blocks share it and their
+		// counters fit in one flat vector, instead of a matrix with one vector (and one allocation) per
+		// row.
+		template <typename DestFn, typename KeepFn, typename FillFn>
+		void row_map(sparse_tensor_struct<T, index_t>& B, const size_t row_start, const size_t row_end,
+			DestFn&& dest, KeepFn&& keep, FillFn&& fill, thread_pool* pool) const {
+			const size_t n_out = B.dims[0];
+			// the result rowptr holds the counts first; it is zeroed already
+			std::vector<size_t>& res_rowptr = B.rowptr;
+
+			if (pool == nullptr) {
+				for (size_t i = row_start; i < row_end; i++)
+					for (size_t j = rowptr[i]; j < rowptr[i + 1]; j++)
+						if (keep(i, j))
+							res_rowptr[dest(i) + 1]++;
+				rowptr_prefix_sum(res_rowptr, n_out);
+				B.reserve(res_rowptr[n_out]);
+				// one cursor per result row: its first free index is its rowptr entry
+				for (size_t i = row_start; i < row_end; i++) {
+					size_t res = res_rowptr[dest(i)];
+					for (size_t j = rowptr[i]; j < rowptr[i + 1]; j++)
+						if (keep(i, j))
+							fill(B, i, j, res);
+				}
+				return;
+			}
+
+			const size_t nrow = row_end - row_start;
+			const size_t nthread = pool->get_thread_count();
+			// where the counters of every row's blocks start in the flat counter vector
+			std::vector<size_t> block_start(nrow + 1, 0);
+			for (size_t i = row_start; i < row_end; i++)
+				block_start[i - row_start + 1] = block_start[i - row_start] +
+					entry_blocks_t(rowptr[i], rowptr[i + 1], nthread).nblk;
+			std::vector<size_t> block_offset(block_start[nrow], 0);
+			// the counter of a block becomes the first index of that block in the result
+			for (size_t i = row_start; i < row_end; i++) {
+				const size_t base = block_start[i - row_start];
+				const entry_blocks_t blks(rowptr[i], rowptr[i + 1], nthread);
+				pool->detach_sequence(0, blks.nblk, [&](size_t blk) {
+					size_t n = 0;
+					for (size_t j = blks.start(blk); j < blks.end(blk); j++)
+						if (keep(i, j))
+							n++;
+					block_offset[base + blk] = n;
+					});
+				pool->wait();
+			}
+			for (size_t i = row_start; i < row_end; i++)
+				for (size_t blk = block_start[i - row_start]; blk < block_start[i - row_start + 1]; blk++)
+					res_rowptr[dest(i) + 1] += block_offset[blk];
+			rowptr_prefix_sum(res_rowptr, n_out);
+			B.reserve(res_rowptr[n_out]);
+			for (size_t i = row_start; i < row_end; i++) {
+				const size_t base = block_start[i - row_start];
+				size_t off = res_rowptr[dest(i)];
+				for (size_t blk = base; blk < block_start[i - row_start + 1]; blk++) {
+					const size_t n = block_offset[blk];
+					block_offset[blk] = off;
+					off += n;
+				}
+			}
+			for (size_t i = row_start; i < row_end; i++) {
+				const size_t base = block_start[i - row_start];
+				const entry_blocks_t blks(rowptr[i], rowptr[i + 1], nthread);
+				pool->detach_sequence(0, blks.nblk, [&](size_t blk) {
+					size_t res = block_offset[base + blk];
+					for (size_t j = blks.start(blk); j < blks.end(blk); j++)
+						if (keep(i, j))
+							fill(B, i, j, res);
+					});
+				pool->wait();
+			}
+		}
+
+		// A run of a row map: the `nnz` kept entries of a row that start at the visited entry `k` and
+		// all go to the same result row `dest`, written from the index `offset` of that row
+		struct run_t {
+			size_t dest;
+			size_t k;
+			size_t nnz;
+			size_t offset;
+		};
+
+		// Row wise map of a single row, whose entries are visited in the order `perm` gives (nullptr for
+		// the natural order). `dest(i, j)` has to be non-decreasing along that order, which a sorted row
+		// (and a perm sorted by the same index) gives: then the kept entries of one result row are
+		// consecutive, so the serial path writes them in visit order without any counter beyond the
+		// result rowptr, and the pool path only has to know where each run of equal result rows starts.
+		template <typename DestFn, typename KeepFn, typename FillFn>
+		void row_map_run(sparse_tensor_struct<T, index_t>& B, const size_t row, const std::vector<size_t>* perm,
+			DestFn&& dest, KeepFn&& keep, FillFn&& fill, thread_pool* pool) const {
+			const size_t n_out = B.dims[0];
+			const size_t begin = rowptr[row];
+			const size_t len = rowptr[row + 1] - begin;
+			// the k-th visited entry of the row
+			auto entry_at = [&](const size_t k) { return begin + (perm == nullptr ? k : (*perm)[k]); };
+			std::vector<size_t>& res_rowptr = B.rowptr;
+
+			if (pool == nullptr) {
+				// count: res_rowptr[k + 1] counts the entries whose result row is k
+				for (size_t k = 0; k < len; k++) {
+					const size_t j = entry_at(k);
+					if (keep(row, j))
+						res_rowptr[dest(row, j) + 1]++;
+				}
+				rowptr_prefix_sum(res_rowptr, n_out);
+				B.reserve(res_rowptr[n_out]);
+				// write: a monotone map puts every kept entry behind the kept entries before it, so its
+				// index in the result is the running count, and the result rows come out grouped
+				size_t res = 0;
+				for (size_t k = 0; k < len; k++) {
+					const size_t j = entry_at(k);
+					if (keep(row, j))
+						fill(B, row, j, res);
+				}
+				return;
+			}
+
+			// pool: one run per group of kept entries with the same result row, so that the writing can be
+			// shared out; the counts fall out as the runs are closed
+			std::vector<run_t> runs;
+			size_t cur_dest = 0;
+			size_t cur_nnz = 0;
+			bool open = false;
+			for (size_t k = 0; k < len; k++) {
+				const size_t j = entry_at(k);
+				if (!keep(row, j))
+					continue;
+				const size_t d = dest(row, j);
+				if (open && d == cur_dest) {
+					cur_nnz++;
+					continue;
+				}
+				if (open) {
+					res_rowptr[cur_dest + 1] += cur_nnz;
+					runs.back().nnz = cur_nnz;
+				}
+				runs.push_back(run_t{ d, k, 0, 0 });
+				cur_dest = d;
+				cur_nnz = 1;
+				open = true;
+			}
+			if (open) {
+				res_rowptr[cur_dest + 1] += cur_nnz;
+				runs.back().nnz = cur_nnz;
+			}
+			rowptr_prefix_sum(res_rowptr, n_out);
+			B.reserve(res_rowptr[n_out]);
+			// the runs are in result row order, so a run starts where its own row is still free
+			size_t cursor = 0;
+			size_t last_dest = 0;
+			bool first = true;
+			for (run_t& r : runs) {
+				if (first || r.dest != last_dest) {
+					first = false;
+					last_dest = r.dest;
+					cursor = res_rowptr[r.dest];
+				}
+				r.offset = cursor;
+				cursor += r.nnz;
+			}
+			// write the entries of a run: the run holds exactly `nnz` kept entries from `k` on
+			auto write_run = [&](const run_t& r) {
+				size_t res = r.offset;
+				for (size_t k = r.k, done = 0; done < r.nnz; k++) {
+					const size_t j = entry_at(k);
+					if (!keep(row, j))
+						continue;
+					fill(B, row, j, res);
+					done++;
+				}
+				};
+			pool->detach_blocks(0, runs.size(), [&](size_t ss, size_t ee) {
+				for (size_t r = ss; r < ee; r++)
+					write_run(runs[r]);
+				});
+			pool->wait();
+		}
+
+
 		// take a span of rows
 		// sparse_tensor_struct.take({start, end}) returns a sparse_tensor with rows indexed in [start, end)
 		sparse_tensor_struct<T, index_t> take(const interval_t& span, thread_pool* pool = nullptr) const {
-			if (span.second > dims[0])
-				throw std::invalid_argument("sparse_tensor_struct.take: [start, end) out of [0, dims[0]).");
-			if (span.first > span.second)
-				throw std::invalid_argument("sparse_tensor_struct.take: invalid span.");
-			if (span.first < 0 || span.second < 0)
-				throw std::invalid_argument("sparse_tensor_struct.take: expect non-negative indices.");
+			if (span.second > dims[0]) {
+				report_error("sparse_tensor_struct.take: [start, end) out of [0, dims[0]).");
+				return {};
+			}
+			if (span.first > span.second) {
+				report_error("sparse_tensor_struct.take: invalid span.");
+				return {};
+			}
+			if (span.first < 0 || span.second < 0) {
+				report_error("sparse_tensor_struct.take: expect non-negative indices.");
+				return {};
+			}
 
 			std::vector<size_t> res_dims = dims;
 			res_dims[0] = span.second - span.first;
@@ -1393,190 +1644,84 @@ namespace SparseRREF {
 				return take(span, pool);
 
 			else if (levelspec < rank) {
-				if (span.second > dims[levelspec])
-					throw std::out_of_range("sparse_tensor_struct.take: [start, end) out of [0, dims[levelspec]).");
-				if (span.first > span.second)
-					throw std::invalid_argument("sparse_tensor_struct.take: invalid span.");
-				if (span.first < 0 || span.second < 0)
-					throw std::invalid_argument("sparse_tensor_struct.take: expect non-negative indices.");
+				if (span.second > dims[levelspec]) {
+					report_error("sparse_tensor_struct.take: [start, end) out of [0, dims[levelspec]).");
+					return {};
+				}
+				if (span.first > span.second) {
+					report_error("sparse_tensor_struct.take: invalid span.");
+					return {};
+				}
+				if (span.first < 0 || span.second < 0) {
+					report_error("sparse_tensor_struct.take: expect non-negative indices.");
+					return {};
+				}
 
 				std::vector<size_t> res_dims = dims;
 				res_dims[levelspec] = span.second - span.first;
-				std::vector<size_t> res_row_nnz(res_dims[0], 0);
-
-				if (pool == nullptr) {
-					// count nnz
-					auto count_row_nnz = [&](size_t i, size_t j) {
-						auto tmpptr = colptr + j * (rank - 1);
-						if (tmpptr[levelspec - 1] >= span.first && tmpptr[levelspec - 1] < span.second) {
-							res_row_nnz[i]++;
-						}
+				sparse_tensor_struct<T, index_t> B(res_dims);
+				// the entries that keep their coordinate at the levelspec-th level, reindexed to the span
+				auto dest = [](size_t i) { return i; };
+				auto keep = [&](size_t, size_t j) {
+					const index_t coord = colptr[j * (rank - 1) + levelspec - 1];
+					return coord >= span.first && coord < span.second;
 					};
-					traverse(0, dims[0], count_row_nnz, [](size_t) {});
-					// construct result sparse tensor
-					size_t res_nnz = std::accumulate(res_row_nnz.begin(), res_row_nnz.end(), (size_t)0);
-					sparse_tensor_struct<T, index_t> B(res_dims, res_nnz);
-					// set rowptr
-					B.rowptr[0] = 0;
-					for (size_t i = 0; i < res_dims[0]; i++) {
-						B.rowptr[i + 1] = B.rowptr[i] + res_row_nnz[i];
-					}
-					// set colptr and valptr
-					// row init: evaluate starting index in B
-					auto row_init_indexing = [&](size_t i) -> size_t {
-						return B.rowptr[i];
+				auto fill = [&](sparse_tensor_struct<T, index_t>& R, size_t, size_t j, size_t& res) {
+					auto tmpptr = colptr + j * (rank - 1);
+					std::copy(tmpptr, tmpptr + rank - 1, R.colptr + res * (rank - 1));
+					R.colptr[res * (rank - 1) + levelspec - 1] -= span.first;
+					R.valptr[res] = valptr[j];
+					res++;
 					};
-					// copy entries
-					auto copy_entry = [&](size_t i, size_t j, size_t& res_index) {
-						auto tmpptr = colptr + j * (rank - 1);
-						if (tmpptr[levelspec - 1] >= span.first && tmpptr[levelspec - 1] < span.second) {
-							std::copy(tmpptr, tmpptr + rank - 1, B.colptr + res_index * (rank - 1));
-							B.colptr[res_index * (rank - 1) + levelspec - 1] -= span.first;
-							B.valptr[res_index] = valptr[j];
-							res_index++;
-						}
-					};
-					traverse(0, dims[0], copy_entry, row_init_indexing);
-					return B;
-				}
-				else {
-					auto nthread = pool->get_thread_count();
-					// count nnz
-					std::vector<std::vector<size_t>> res_row_block_nnz(res_dims[0]);
-					// row init: initialize block nnz storage
-					auto row_init_block_nnz = [&](size_t i, BS::blocks<size_t> blks) {
-						res_row_block_nnz[i] = std::vector<size_t>(blks.get_num_blocks(), 0);
-					};
-					// count nnz in each block
-					auto count_row_block_nnz = [&](size_t i, size_t j, size_t blk) {
-						auto tmpptr = colptr + j * (rank - 1);
-						if (tmpptr[levelspec - 1] >= span.first && tmpptr[levelspec - 1] < span.second)
-							res_row_block_nnz[i][blk]++;
-					};
-					std::vector<BS::blocks<size_t>> row_blocks = traverse_setup_blocks(0, dims[0], count_row_block_nnz, row_init_block_nnz, [](size_t, size_t) {}, pool);
-					// sum up block nnz
-					for (size_t i = 0; i < dims[0]; i++) {
-						res_row_nnz[i] = std::accumulate(res_row_block_nnz[i].begin(), res_row_block_nnz[i].end(), (size_t)0);
-					}
-					size_t res_nnz = std::accumulate(res_row_nnz.begin(), res_row_nnz.end(), (size_t)0);
-					sparse_tensor_struct<T, index_t> B(res_dims, res_nnz);
-					// set rowptr
-					B.rowptr[0] = 0;
-					for (size_t i = 0; i < res_dims[0]; i++) {
-						B.rowptr[i + 1] = B.rowptr[i] + res_row_nnz[i];
-					}
-					// set colptr and valptr
-					// row init: evaluate block offsets
-					auto row_init_block_offset = [&](size_t i, BS::blocks<size_t> blks) -> std::vector<size_t> {
-						size_t n_blocks = blks.get_num_blocks();
-						std::vector<size_t> block_offset(n_blocks, 0);
-						for (size_t j = 0; j < n_blocks - 1; j++) {
-							block_offset[j + 1] = block_offset[j] + res_row_block_nnz[i][j];
-						}
-						return block_offset;
-					};
-					// block init: evaluate starting index in B
-					auto block_init_indexing = [&](size_t i, size_t blk, const std::vector<size_t>& block_offset) -> size_t {
-						return  B.rowptr[i] + block_offset[blk];
-					};
-					// copy entries
-					auto copy_entry = [&](size_t i, size_t j, size_t blk, const std::vector<size_t>& block_offset, size_t& res_index) {
-						auto tmpptr = colptr + j * (rank - 1);
-						if (tmpptr[levelspec - 1] >= span.first && tmpptr[levelspec - 1] < span.second) {
-							std::copy(tmpptr, tmpptr + rank - 1, B.colptr + res_index * (rank - 1));
-							B.colptr[res_index * (rank - 1) + levelspec - 1] -= span.first;
-							B.valptr[res_index] = valptr[j];
-							res_index++;
-						}
-					};
-					traverse_using_blocks(0, dims[0], copy_entry, row_init_block_offset, block_init_indexing, row_blocks, pool);
-					return B;
-				}
+				row_map(B, 0, dims[0], dest, keep, fill, pool);
+				return B;
 			}
 			else {
-				throw std::invalid_argument("sparse_tensor_struct.take: levelspec out of rank.");
+				report_error("sparse_tensor_struct.take: levelspec out of rank.");
+				return {};
 			}
 		}
 
 		// extract a (rank-1) tensor by fixing the first index
 		sparse_tensor_struct<T, index_t> extract(const index_t index, thread_pool* pool = nullptr) const {
 			// Note: require sorted/perm to ensure correctness
-			if (index < 0)
-				throw std::invalid_argument("sparse_tensor_struct.extract: expect non-negative indices.");
-			if (index >= static_cast<index_t>(dims[0]))
-				throw std::out_of_range("sparse_tensor_struct.extract: index out of range.");
+			if (index < 0) {
+				report_error("sparse_tensor_struct.extract: expect non-negative indices.");
+				return {};
+			}
+			if (index >= static_cast<index_t>(dims[0])) {
+				report_error("sparse_tensor_struct.extract: index out of range.");
+				return {};
+			}
 
 			std::vector<size_t> res_dims(rank - 1);
 			for (size_t i = 0; i < rank - 1; i++)
 				res_dims[i] = dims[i + 1];
+			sparse_tensor_struct<T, index_t> B(res_dims);
+			// the result rows are the remaining indices of the row, so the entries have to be visited in
+			// increasing order of that index: a perm sorted by the whole index gives it when the row is not
+			// sorted already
 			const size_t res_nnz = row_nnz(index);
-			sparse_tensor_struct<T, index_t> B(res_dims, res_nnz);
-			B.rowptr[0] = 0;
-			if (pool == nullptr) {
-				for (size_t j = rowptr[index]; j < rowptr[index + 1]; j++) {
-					auto tmpptr = colptr + j * (rank - 1);
-					B.rowptr[tmpptr[0] + 1]++;
-					std::copy(tmpptr + 1, tmpptr + (rank - 1), B.colptr + (j - rowptr[index]) * (rank - 2));
-				}
-				for (size_t i = 0; i < res_dims[0]; i++) {
-					B.rowptr[i + 1] += B.rowptr[i];
-				}
-				std::copy(valptr + rowptr[index], valptr + rowptr[index + 1], B.valptr);
-				// if not sorted, we need to permute the entries
-				if (!check_sorted()) {
-					std::vector<size_t> perm = perm_init(res_nnz);
-					parallel_sort(perm.begin(), perm.end(), [&](size_t a, size_t b) {
-						auto ptra = colptr + (rowptr[index] + a) * (rank - 1);
-						auto ptrb = colptr + (rowptr[index] + b) * (rank - 1);
-						return lexico_compare(ptra, ptrb, rank - 1) < 0;
-						}, pool);
-					permute(perm, B.colptr, rank - 2);
-					permute(perm, B.valptr);
-				}
+			std::vector<size_t> perm;
+			const std::vector<size_t>* order = nullptr;
+			if (!check_sorted()) {
+				perm = perm_init(res_nnz);
+				parallel_sort(perm.begin(), perm.end(), [&](size_t a, size_t b) {
+					auto ptra = colptr + (rowptr[index] + a) * (rank - 1);
+					auto ptrb = colptr + (rowptr[index] + b) * (rank - 1);
+					return lexico_compare(ptra, ptrb, rank - 1) < 0;
+					}, pool);
+				order = &perm;
 			}
-			else {
-				auto nthread = pool->get_thread_count();
-				std::vector<std::vector<size_t>> row_block_nnz(res_dims[0], std::vector<size_t>(nthread, 0)); 
-				if (check_sorted()) {
-					pool->detach_blocks(rowptr[index], rowptr[index + 1], [&](size_t ss, size_t ee) {
-						for (size_t j = ss; j < ee; j++) {
-							auto tmpptr = colptr + j * (rank - 1);
-							auto id = SparseRREF::thread_id();
-							row_block_nnz[tmpptr[0]][id]++;
-							std::copy(tmpptr + 1, tmpptr + (rank - 1), B.colptr + (j - rowptr[index]) * (rank - 2));
-						}
-						std::copy(valptr + ss, valptr + ee, B.valptr + (ss - rowptr[index]));
-						});
-					pool->wait();
-					// set rowptr
-					for (size_t i = 0; i < res_dims[0]; i++) {
-						B.rowptr[i + 1] = B.rowptr[i] + std::accumulate(row_block_nnz[i].begin(), row_block_nnz[i].end(), (size_t)0);
-					}
-				}
-				else {
-					std::vector<size_t> perm = perm_init(res_nnz);
-					parallel_sort(perm.begin(), perm.end(), [&](size_t a, size_t b) {
-						auto ptra = colptr + (rowptr[index] + a) * (rank - 1);
-						auto ptrb = colptr + (rowptr[index] + b) * (rank - 1);
-						return lexico_compare(ptra, ptrb, rank - 1) < 0;
-						}, pool);
-					pool->detach_blocks(0, res_nnz, [&](size_t ss, size_t ee) {
-						for (size_t j = ss; j < ee; j++) {
-							auto oldptr = colptr + (rowptr[index] + perm[j]) * (rank - 1);
-							auto newptr = B.colptr + j * (rank - 2);
-							auto id = SparseRREF::thread_id();
-							row_block_nnz[oldptr[0]][id]++;
-							std::copy(oldptr + 1, oldptr + (rank - 1), newptr);
-							B.valptr[j] = valptr[rowptr[index] + perm[j]];
-						}
-						});
-					pool->wait();
-					// set rowptr
-					for (size_t i = 0; i < res_dims[0]; i++) {
-						B.rowptr[i + 1] = B.rowptr[i] + std::accumulate(row_block_nnz[i].begin(), row_block_nnz[i].end(), (size_t)0);
-					}
-				}
-			}
+			auto dest = [&](size_t, size_t j) { return static_cast<size_t>(colptr[j * (rank - 1)]); };
+			auto keep = [](size_t, size_t) { return true; };
+			auto fill = [&](sparse_tensor_struct<T, index_t>& R, size_t, size_t j, size_t& res) {
+				auto tmpptr = colptr + j * (rank - 1);
+				std::copy(tmpptr + 1, tmpptr + (rank - 1), R.colptr + res * (rank - 2));
+				R.valptr[res] = valptr[j];
+				res++;
+				};
+			row_map_run(B, index, order, dest, keep, fill, pool);
 			return B;
 		}
 
@@ -1585,12 +1730,18 @@ namespace SparseRREF {
 			// Note: require sorted/perm to ensure correctness if levelspec == 0
 			if (levelspec == 0)
 				return extract(index, pool);
-			if (levelspec >= rank)
-				throw std::invalid_argument("sparse_tensor_struct.extract: levelspec out of rank.");
-			if (index < 0)
-				throw std::invalid_argument("sparse_tensor_struct.extract: expect non-negative indices.");
-			if (index >= static_cast<index_t>(dims[levelspec]))
-				throw std::out_of_range("sparse_tensor_struct.extract: index out of range.");
+			if (levelspec >= rank) {
+				report_error("sparse_tensor_struct.extract: levelspec out of rank.");
+				return {};
+			}
+			if (index < 0) {
+				report_error("sparse_tensor_struct.extract: expect non-negative indices.");
+				return {};
+			}
+			if (index >= static_cast<index_t>(dims[levelspec])) {
+				report_error("sparse_tensor_struct.extract: index out of range.");
+				return {};
+			}
 
 			std::vector<size_t> res_dims(rank - 1);
 			for (size_t i = 0; i < rank - 1; i++) {
@@ -1599,91 +1750,18 @@ namespace SparseRREF {
 				else
 					res_dims[i] = dims[i + 1];
 			}
-			std::vector<size_t> res_row_nnz(res_dims[0], 0);
-
-			if (pool == nullptr) {
-				// count nnz
-				auto count_row_nnz = [&](size_t i, size_t j) {
-					auto tmpptr = colptr + j * (rank - 1);
-					if (tmpptr[levelspec - 1] == index) {
-						res_row_nnz[i]++;
-					}
+			sparse_tensor_struct<T, index_t> B(res_dims);
+			auto dest = [](size_t i) { return i; };
+			auto keep = [&](size_t, size_t j) { return colptr[j * (rank - 1) + levelspec - 1] == index; };
+			auto fill = [&](sparse_tensor_struct<T, index_t>& R, size_t, size_t j, size_t& res) {
+				auto tmpptr = colptr + j * (rank - 1);
+				std::copy(tmpptr, tmpptr + levelspec - 1, R.colptr + res * (rank - 2));
+				std::copy(tmpptr + levelspec, tmpptr + (rank - 1), R.colptr + res * (rank - 2) + levelspec - 1);
+				R.valptr[res] = valptr[j];
+				res++;
 				};
-				traverse(0, dims[0], count_row_nnz, [](size_t) {});
-				size_t res_nnz = std::accumulate(res_row_nnz.begin(), res_row_nnz.end(), (size_t)0);
-				sparse_tensor_struct<T, index_t> B(res_dims, res_nnz);
-				// set rowptr
-				B.rowptr[0] = 0;
-				for (size_t i = 0; i < res_dims[0]; i++) {
-					B.rowptr[i + 1] = B.rowptr[i] + res_row_nnz[i];
-				}
-				// set colptr and valptr
-				// row init: evaluate starting index in B
-				auto row_init_indexing = [&](size_t i) -> size_t {
-					return B.rowptr[i];
-				};
-				// copy entries
-				auto copy_entry = [&](size_t i, size_t j, size_t& res_index) {
-					auto tmpptr = colptr + j * (rank - 1);
-					if (tmpptr[levelspec - 1] == index) {
-						std::copy(tmpptr, tmpptr + levelspec - 1, B.colptr + res_index * (rank - 2));
-						std::copy(tmpptr + levelspec, tmpptr + (rank - 1), B.colptr + res_index * (rank - 2) + levelspec - 1);
-						B.valptr[res_index] = valptr[j];
-						res_index++;
-					}
-				};
-				traverse(0, dims[0], copy_entry, row_init_indexing);
-				return B;
-			}
-			else {
-				auto nthread = pool->get_thread_count();
-				// count nnz
-				std::vector<std::vector<size_t>> res_row_block_nnz(res_dims[0]);
-				auto row_init_block_nnz = [&](size_t i, BS::blocks<size_t> blks) {
-					res_row_block_nnz[i] = std::vector<size_t>(blks.get_num_blocks(), 0);
-				};
-				auto count_row_block_nnz = [&](size_t i, size_t j, size_t blk) {
-					auto tmpptr = colptr + j * (rank - 1);
-					if (tmpptr[levelspec - 1] == index)
-						res_row_block_nnz[i][blk]++;
-				};
-				std::vector<BS::blocks<size_t>> row_blocks = traverse_setup_blocks(0, dims[0], count_row_block_nnz, row_init_block_nnz, [](size_t, size_t) {}, pool);
-				// sum up block nnz
-				for (size_t i = 0; i < dims[0]; i++) {
-					res_row_nnz[i] = std::accumulate(res_row_block_nnz[i].begin(), res_row_block_nnz[i].end(), (size_t)0);
-				}
-				size_t res_nnz = std::accumulate(res_row_nnz.begin(), res_row_nnz.end(), (size_t)0);
-				sparse_tensor_struct<T, index_t> B(res_dims, res_nnz);
-				// set rowptr
-				B.rowptr[0] = 0;
-				for (size_t i = 0; i < res_dims[0]; i++) {
-					B.rowptr[i + 1] = B.rowptr[i] + res_row_nnz[i];
-				}
-				// set colptr and valptr
-				auto row_init_block_offset = [&](size_t i, BS::blocks<size_t> blks) -> std::vector<size_t> {
-					size_t n_blocks = blks.get_num_blocks();
-					std::vector<size_t> block_offset(n_blocks, 0);
-					for (size_t j = 0; j < n_blocks - 1; j++) {
-						block_offset[j + 1] = block_offset[j] + res_row_block_nnz[i][j];
-					}
-					return block_offset;
-				};
-				auto block_init_indexing = [&](size_t i, size_t blk, const std::vector<size_t>& block_offset) -> size_t {
-					return B.rowptr[i] + block_offset[blk];
-				};
-				auto copy_entry = [&](size_t i, size_t j, size_t blk, const std::vector<size_t>& block_offset, size_t& res_index) {
-					auto tmpptr = colptr + j * (rank - 1);
-					if (tmpptr[levelspec - 1] == index) {
-						std::copy(tmpptr, tmpptr + levelspec - 1, B.colptr + res_index * (rank - 2));
-						std::copy(tmpptr + levelspec, tmpptr + (rank - 1), B.colptr + res_index * (rank - 2) + levelspec - 1);
-						B.valptr[res_index] = valptr[j];
-						res_index++;
-					}
-				};
-				// use the predefined blocks
-				traverse_using_blocks(0, dims[0], copy_entry, row_init_block_offset, block_init_indexing, row_blocks, pool);
-				return B;
-			}
+			row_map(B, 0, dims[0], dest, keep, fill, pool);
+			return B;
 		}
 
 		/* extract certain part from tensor, similar to Part in Mathematica 
@@ -1695,7 +1773,8 @@ namespace SparseRREF {
 		sparse_tensor_struct<T, index_t> part(const std::vector<std::variant<index_t, interval_t>>& partspec, thread_pool* pool = nullptr) const {
 			// Note: require sorted/perm to ensure correctness if partspec[0] is index_t
 			if (partspec.size() != rank) {
-				throw std::invalid_argument("sparse_tensor_struct.part: partspec size not equal to rank.");
+				report_error("sparse_tensor_struct.part: partspec size not equal to rank.");
+				return {};
 			}
 
 			// process partspec to get result dimensions
@@ -1704,18 +1783,26 @@ namespace SparseRREF {
 			for (size_t i = 0; i < rank; i++) {
 				if (std::holds_alternative<index_t>(partspec[i])) {
 					index_t idx = std::get<index_t>(partspec[i]);
-					if (idx < 0 || idx >= static_cast<index_t>(dims[i]))
-						throw std::out_of_range("sparse_tensor_struct.part: index out of range.");
+					if (idx < 0 || idx >= static_cast<index_t>(dims[i])) {
+						report_error("sparse_tensor_struct.part: index out of range.");
+						return {};
+					}
 					is_span[i] = 0;
 				}
 				else {
 					auto& span = std::get<interval_t>(partspec[i]);
-					if (span.first < 0 || span.second < 0)
-						throw std::invalid_argument("sparse_tensor_struct.part: expect non-negative indices.");
-					if (span.first > span.second)
-						throw std::invalid_argument("sparse_tensor_struct.part: invalid span.");
-					if (span.second > static_cast<index_t>(dims[i]))
-						throw std::out_of_range("sparse_tensor_struct.part: [start, end) out of [0, dims[i]).");
+					if (span.first < 0 || span.second < 0) {
+						report_error("sparse_tensor_struct.part: expect non-negative indices.");
+						return {};
+					}
+					if (span.first > span.second) {
+						report_error("sparse_tensor_struct.part: invalid span.");
+						return {};
+					}
+					if (span.second > static_cast<index_t>(dims[i])) {
+						report_error("sparse_tensor_struct.part: [start, end) out of [0, dims[i]).");
+						return {};
+					}
 					if (span.first == 0 && span.second == dims[i])
 						is_span[i] = 2; // full span
 					else
@@ -1724,8 +1811,10 @@ namespace SparseRREF {
 				}
 			}
 			// check result rank
-			if (res_dims.size() < 2)
-				throw std::invalid_argument("sparse_tensor_struct.part: result tensor rank < 2.");
+			if (res_dims.size() < 2) {
+				report_error("sparse_tensor_struct.part: result tensor rank < 2.");
+				return {};
+			}
 
 			// Now introduce some helper variables and functions
 
@@ -1792,162 +1881,54 @@ namespace SparseRREF {
 			const size_t rowspec_idx = (is_span[0] == 0) ? std::get<index_t>(partspec[0]) : row_span.first;
 
 			const bool sorted = check_sorted();
-
-			// main processing
 			sparse_tensor_struct<T, index_t> B(res_dims);
-			std::vector<size_t> res_row_nnz(res_dims[0], 0);
 
-			auto part_impl = [&]<bool SingleThread, bool RowspecIsSpan, bool Sorted>() {
-				// get new row index
-				auto new_row_index = [&](size_t i, const_index_p tmpptr) -> size_t {
-					if constexpr (!RowspecIsSpan)
-						return tmpptr[new_row_level] - new_row_reindex;
-					// else
-					return i - row_span.first;
+			// the result row of an entry: the rowspec fixes it when it is a span, and the first copied
+			// level gives it when the rowspec is an index (then every entry read comes from one row)
+			auto dest_span = [&](size_t i) { return i - row_span.first; };
+			auto dest_index = [&](size_t, size_t j) {
+				return static_cast<size_t>(colptr[j * (rank - 1) + new_row_level] - new_row_reindex);
+				};
+			auto keep = [&](size_t, size_t j) { return check_coordinate(colptr + j * (rank - 1)); };
+			auto fill = [&](sparse_tensor_struct<T, index_t>& R, size_t, size_t j, size_t& res) {
+				auto oldptr = colptr + j * (rank - 1);
+				auto newptr = R.colptr + res * (R.rank - 1);
+				copy_colptr(oldptr, newptr);
+				R.valptr[res] = valptr[j];
+				res++;
 				};
 
-				// prepare perm if necessary
-				std::vector<size_t> perm;
-				if constexpr (!Sorted && !RowspecIsSpan) {
-					perm = perm_init(rowptr[rowspec_idx + 1] - rowptr[rowspec_idx]);
-					parallel_sort(perm.begin(), perm.end(), [&](size_t a, size_t b) {
-						auto ptra = colptr + (rowptr[rowspec_idx] + a) * (rank - 1);
-						auto ptrb = colptr + (rowptr[rowspec_idx] + b) * (rank - 1);
-						return lexico_compare(ptra, ptrb, rank - 1) < 0;
-						}, pool);
+			// `Sorted` is false only when the rowspec is an index and the tensor is not sorted: then the
+			// entries of the one row we read have to be permuted into result row order first
+			auto part_impl = [&]<bool RowspecIsSpan, bool Sorted>() {
+				if constexpr (RowspecIsSpan) {
+					row_map(B, row_span.first, row_span.second, dest_span, keep, fill, pool);
 				}
-				// position of the sorted j-th element
-				auto sorted_jth = [&](size_t j) -> size_t {
-					if constexpr (!Sorted && !RowspecIsSpan)
-						return rowptr[rowspec_idx] + perm[j - rowptr[rowspec_idx]];
-					// else
-					return j;
+				else {
+					std::vector<size_t> perm;
+					const std::vector<size_t>* order = nullptr;
+					if constexpr (!Sorted) {
+						perm = perm_init(rowptr[rowspec_idx + 1] - rowptr[rowspec_idx]);
+						parallel_sort(perm.begin(), perm.end(), [&](size_t a, size_t b) {
+							auto ptra = colptr + (rowptr[rowspec_idx] + a) * (rank - 1);
+							auto ptrb = colptr + (rowptr[rowspec_idx] + b) * (rank - 1);
+							return lexico_compare(ptra, ptrb, rank - 1) < 0;
+							}, pool);
+						order = &perm;
+					}
+					row_map_run(B, rowspec_idx, order, dest_index, keep, fill, pool);
+				}
 				};
-
-				if constexpr (SingleThread) {
-					// count nnz
-					auto count_row_nnz = [&](size_t i, size_t j) {
-						auto tmpptr = colptr + j * (rank - 1);
-						if (check_coordinate(tmpptr))
-							res_row_nnz[new_row_index(i, tmpptr)]++;
-					};
-					traverse(row_span.first, row_span.second, count_row_nnz, [](size_t) {});
-					// reserve nnz for B
-					size_t res_nnz = std::accumulate(res_row_nnz.begin(), res_row_nnz.end(), (size_t)0);
-					B.reserve(res_nnz);
-					// set rowptr
-					B.rowptr[0] = 0;
-					for (size_t i = 0; i < res_dims[0]; i++) {
-						B.rowptr[i + 1] = B.rowptr[i] + res_row_nnz[i];
-					}
-					// set colptr and valptr
-					// due to the complexity of !RowspecIsSpan case, we predefine the row starting index, instead of evaluating them during traversal
-					std::vector<size_t> row_starting_index(B.rowptr.begin(), B.rowptr.end() - 1);
-					// copy entries
-					auto copy_entry = [&](size_t i, size_t j) {
-						auto tmpptr = colptr + sorted_jth(j) * (rank - 1);
-						if (check_coordinate(tmpptr)) {
-							size_t& res_index = row_starting_index[new_row_index(i, tmpptr)];
-							auto new_coord = B.colptr + res_index * (B.rank - 1);
-							copy_colptr(tmpptr, new_coord);
-							B.valptr[res_index] = valptr[sorted_jth(j)];
-							res_index++;
-						}
-					};
-					traverse(row_span.first, row_span.second, copy_entry, [](size_t) {});
-				}
-				else {
-					auto nthread = pool->get_thread_count();
-					// count nnz
-					std::vector<std::vector<size_t>> row_block_nnz(res_dims[0]);
-					if constexpr (!RowspecIsSpan)
-						row_block_nnz.assign(res_dims[0], std::vector<size_t>(nthread, 0));
-					// row init: initialize block nnz storage
-					auto row_init_block_nnz = [&](size_t i, BS::blocks<size_t> blks) {
-						if constexpr (RowspecIsSpan)
-							row_block_nnz[i - row_span.first] = std::vector<size_t>(blks.get_num_blocks(), 0);
-					};
-					// count nnz in each block
-					auto count_row_block_nnz = [&](size_t i, size_t j, size_t blk) {
-						auto tmpptr = colptr + sorted_jth(j) * (rank - 1);
-						if (check_coordinate(tmpptr)) {
-							row_block_nnz[new_row_index(i, tmpptr)][blk]++;
-						}
-					};
-					std::vector<BS::blocks<size_t>> row_blocks = traverse_setup_blocks(row_span.first, row_span.second, count_row_block_nnz, row_init_block_nnz, [](size_t, size_t) {}, pool);
-					// sum up block nnz
-					for (size_t i = 0; i < res_dims[0]; i++) {
-						res_row_nnz[i] = std::accumulate(row_block_nnz[i].begin(), row_block_nnz[i].end(), (size_t)0);
-					}
-					size_t res_nnz = std::accumulate(res_row_nnz.begin(), res_row_nnz.end(), (size_t)0);
-					B.reserve(res_nnz);
-					// set rowptr
-					B.rowptr[0] = 0;
-					for (size_t i = 0; i < res_dims[0]; i++) {
-						B.rowptr[i + 1] = B.rowptr[i] + res_row_nnz[i];
-					}
-					// set colptr and valptr
-					// due to the complexity of !RowspecIsSpan case, we predefine the block offset/starting index, instead of evaluating them during traversal
-					std::vector<std::vector<size_t>> row_block_starting_index(res_dims[0], std::vector<size_t>(nthread, 0));
-					for (size_t i = 0; i < res_dims[0]; i++) {
-						size_t offset = B.rowptr[i];
-						if constexpr (RowspecIsSpan) {
-							for (size_t blk = 0; blk < row_blocks[i].get_num_blocks(); blk++) {
-								row_block_starting_index[i][blk] = offset;
-								offset += row_block_nnz[i][blk];
-							}
-						}
-						else {
-							for (size_t blk = 0; blk < row_blocks[0].get_num_blocks(); blk++) {
-								row_block_starting_index[i][blk] = offset;
-								offset += row_block_nnz[i][blk];
-							}
-						}
-					}
-					// copy entries
-					auto copy_entry = [&](size_t i, size_t j, size_t blk) {
-						auto oldptr = colptr + sorted_jth(j) * (rank - 1);
-						if (check_coordinate(oldptr)) {
-							size_t& res_index = row_block_starting_index[new_row_index(i, oldptr)][blk];
-							auto newptr = B.colptr + res_index * (B.rank - 1);
-							copy_colptr(oldptr, newptr);
-							B.valptr[res_index] = valptr[sorted_jth(j)];
-							res_index++;
-						}
-					};
-					// use the predefined blocks
-					traverse_using_blocks(row_span.first, row_span.second, copy_entry, [](size_t, BS::blocks<size_t>) {}, [](size_t, size_t) {}, row_blocks, pool);
-				}
-			};
-
-			if (pool == nullptr) {
-				if (is_span[0] != 0) {
-					if (sorted)
-						part_impl.template operator()<true, true, true>();
-					else
-						part_impl.template operator()<true, true, false>();
-				}
-				else {
-					if (sorted)
-						part_impl.template operator()<true, false, true>();
-					else
-						part_impl.template operator()<true, false, false>();
-				}
+			if (is_span[0] != 0) {
+				if (sorted)
+					part_impl.template operator()<true, true>();
+				else
+					part_impl.template operator()<true, false>();
 			}
-			else {
-				if (is_span[0] != 0) {
-					if (sorted)
-						part_impl.template operator()<false, true, true>();
-					else
-						part_impl.template operator()<false, true, false>();
-				}
-				else {
-					if (sorted)
-						part_impl.template operator()<false, false, true>();
-					else
-						part_impl.template operator()<false, false, false>();
-				}
-			}
+			else if (sorted)
+				part_impl.template operator()<false, true>();
+			else
+				part_impl.template operator()<false, false>();
 			return B;
 		}
 
@@ -2157,7 +2138,7 @@ namespace SparseRREF {
 			// express here, so report the lost entries and return it
 			if (l.rank() == 0) {
 				if (l.nnz() != 0)
-					std::cerr << "Error: sparse_tensor: a rank 0 tensor cannot be converted to CSR" << std::endl;
+					report_error("sparse_tensor: a rank 0 tensor cannot be converted to CSR");
 				data.clear();
 				data.init({ 0, 0 });
 				return;
@@ -2188,8 +2169,7 @@ namespace SparseRREF {
 					data.rowptr[oldptr[0] + 1]++;
 					std::copy(oldptr + 1, oldptr + newrank, nowptr);
 				}
-				for (size_t i = 0; i < data.dims[0]; i++)
-					data.rowptr[i + 1] += data.rowptr[i];
+				rowptr_prefix_sum(data.rowptr, data.dims[0]);
 			}
 			if (!l_sorted) {
 				std::vector<size_t> perm = perm_init(nnz);
@@ -2217,9 +2197,7 @@ namespace SparseRREF {
 						}
 					});
 					pool->wait();
-					for (size_t i = 0; i < data.dims[0]; i++) {
-						data.rowptr[i + 1] = data.rowptr[i] + std::accumulate(row_block_nnz[i].begin(), row_block_nnz[i].end(), (size_t)0);
-					}
+					rowptr_from_block_counts(row_block_nnz, data.rowptr, data.dims[0]);
 				}
 			}
 		}
@@ -2230,7 +2208,7 @@ namespace SparseRREF {
 			// express here, so report the lost entries and return it
 			if (l.rank() == 0) {
 				if (l.nnz() != 0)
-					std::cerr << "Error: sparse_tensor: a rank 0 tensor cannot be converted to CSR" << std::endl;
+					report_error("sparse_tensor: a rank 0 tensor cannot be converted to CSR");
 				data.clear();
 				data.init({ 0, 0 });
 				return;
@@ -2257,8 +2235,7 @@ namespace SparseRREF {
 				for (size_t j = 0; j < newrank - 1; j++)
 					nowptr[j] = oldptr[j + 1];
 			}
-			for (size_t i = 0; i < data.dims[0]; i++)
-				rowptr[i + 1] += rowptr[i];
+			rowptr_prefix_sum(rowptr, data.dims[0]);
 			data.rowptr = std::move(rowptr);
 			data.rank = newrank;
 			// colptr only holds nnz * (rank - 1) indices now, so alloc must not claim more than that:
@@ -2323,7 +2300,7 @@ namespace SparseRREF {
 
 		sparse_mat<T, index_t> to_sparse_mat(thread_pool* pool = nullptr) const {
 			if (rank() != 2) {
-				std::cerr << "sparse_tensor.to_sparse_mat: rank must be 2" << std::endl;
+				report_error("sparse_tensor.to_sparse_mat: rank must be 2");
 				return sparse_mat<T, index_t>();
 			}
 
@@ -2607,7 +2584,7 @@ namespace SparseRREF {
 
 		sparse_mat<T, index_t> to_sparse_mat(thread_pool* pool = nullptr, const bool sort_ind = true) const {
 			if (rank() != 2) {
-				std::cerr << "sparse_tensor.to_sparse_mat: rank must be 2" << std::endl;
+				report_error("sparse_tensor.to_sparse_mat: rank must be 2");
 				return sparse_mat<T, index_t>();
 			}
 			// sorting cannot be done in place on a const tensor: sort a copy and convert that
@@ -2686,7 +2663,6 @@ namespace SparseRREF {
 			const auto nz = nnz();
 			// the counting passes below keep one bucket per label, so only the orderings whose
 			// dimensions add up to a manageable number of buckets are counted
-			constexpr size_t max_buckets = 1u << 20;
 
 			std::vector<size_t> perm = perm_init(nz);
 			if (is_ordered_by(order))
@@ -2702,7 +2678,7 @@ namespace SparseRREF {
 			bool countable = len > 0 && len <= r;
 			for (size_t l = 0; l < len && countable; l++) {
 				const size_t d = dim(order == nullptr ? l : (*order)[l]);
-				countable = d > 0 && d <= max_buckets - buckets;
+				countable = d > 0 && d <= counting_max_buckets - buckets;
 				buckets += d;
 			}
 
@@ -2762,7 +2738,7 @@ namespace SparseRREF {
 			// exactly rank() entries; the caller is expected to check this, we only degrade to the
 			// natural order here instead of handing back a perm of the wrong size
 			if (index_perm.size() != rank()) {
-				std::cerr << "Error: gen_perm: index_perm size is not equal to rank" << std::endl;
+				report_error("gen_perm: index_perm size is not equal to rank");
 				return gen_perm(pool);
 			}
 
@@ -2781,7 +2757,7 @@ namespace SparseRREF {
 					used[perm[i]] = true;
 			}
 			if (!valid) {
-				std::cerr << "Error: transpose_replace: perm must be a permutation of the indices" << std::endl;
+				report_error("transpose_replace: perm must be a permutation of the indices");
 				return;
 			}
 
@@ -2980,8 +2956,10 @@ namespace SparseRREF {
 	// split a sparse matrix into two parts
 	template <typename T, typename index_t>
 	std::pair<sparse_mat<T, index_t>, sparse_mat<T, index_t>> sparse_mat_split(const sparse_mat<T, index_t>& mat, const size_t split_row, thread_pool* pool = nullptr) {
-		if (split_row > mat.nrow)
-			throw std::out_of_range("sparse_mat_split: split_row out of range");
+		if (split_row > mat.nrow) {
+			report_error("sparse_mat_split: split_row out of range");
+			return {};
+		}
 
 		sparse_mat<T, index_t> A(split_row, mat.ncol);
 		sparse_mat<T, index_t> B(mat.nrow - split_row, mat.ncol);
@@ -3006,8 +2984,10 @@ namespace SparseRREF {
 
 	template <typename T, typename index_t>
 	std::pair<sparse_mat<T, index_t>, sparse_mat<T, index_t>> sparse_mat_split(sparse_mat<T, index_t>&& mat, const size_t split_row) {
-		if (split_row > mat.nrow)
-			throw std::out_of_range("sparse_mat_split: split_row out of range");
+		if (split_row > mat.nrow) {
+			report_error("sparse_mat_split: split_row out of range");
+			return {};
+		}
 
 		sparse_mat<T, index_t> A(split_row, mat.ncol);
 		sparse_mat<T, index_t> B(mat.nrow - split_row, mat.ncol);

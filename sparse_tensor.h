@@ -70,8 +70,7 @@ namespace SparseRREF {
 			};
 
 		// every row costs the same, so handing out the rows hands out the work evenly
-		constexpr size_t par_product_threshold = 1u << 17;
-		if (pool != nullptr && nnzA * nnzB >= par_product_threshold) {
+		if (pool != nullptr && nnzA * nnzB >= product_parallel_threshold) {
 			const size_t nthread = pool->get_thread_count();
 			if (nnzA >= 2 * nthread) {
 				const size_t nblocks = nnzA < 64 * nthread ? nthread : 8 * nthread;
@@ -354,7 +353,6 @@ namespace SparseRREF {
 		// packed into a mixed radix number when its dimensions allow it, so that it compares with one
 		// comparison and the keys of the runs sit in one flat array; a tuple that does not fit keeps its
 		// cache and is compared position by position
-		constexpr size_t par_pack_threshold = 1u << 17;
 		// what a slot of the direct lookup table holds while no run of B starts at that tuple
 		constexpr uint32_t no_run = std::numeric_limits<uint32_t>::max();
 		std::vector<size_t> cstride(i1i2_size, 1), stride_leftA(left_size_A, 1), stride_leftB(left_size_B, 1);
@@ -483,7 +481,7 @@ namespace SparseRREF {
 			};
 
 		const size_t nthread = pool == nullptr ? 1 : pool->get_thread_count();
-		if (pool != nullptr && B.nnz() >= par_pack_threshold) {
+		if (pool != nullptr && B.nnz() >= pack_parallel_threshold) {
 			pool->detach_loop(0, B.nnz(), pack_B, 4 * nthread);
 			pool->wait();
 		}
@@ -537,7 +535,7 @@ namespace SparseRREF {
 		}
 		if (!idB) {
 			val_B.resize(B.nnz());
-			if (pool != nullptr && B.nnz() >= par_pack_threshold) {
+			if (pool != nullptr && B.nnz() >= pack_parallel_threshold) {
 				pool->detach_loop(0, B.nnz(), [&](const size_t k) { val_B[k] = B.val(permB_at(k)); }, 4 * nthread);
 				pool->wait();
 			}
@@ -1092,8 +1090,7 @@ namespace SparseRREF {
 		std::vector<size_t> equal_ind_list;
 
 		// search for the same indices
-		constexpr size_t par_scan_threshold = 1u << 17;
-		if (pool != nullptr && A.nnz() >= par_scan_threshold) {
+		if (pool != nullptr && A.nnz() >= scan_parallel_threshold) {
 			// the scan is a plain pass over the tensor and is what the serial version spends most of
 			// its time on, so above the threshold it is worth handing its blocks to the pool
 			const size_t nthread = pool->get_thread_count();
@@ -1163,7 +1160,7 @@ namespace SparseRREF {
 
 		// the merge cost scales with the number of matched entries, so a small match set stays on one
 		// thread even when a pool is available, since the dispatch overhead would dominate
-		if (pool != nullptr && equal_ind_list.size() >= par_scan_threshold
+		if (pool != nullptr && equal_ind_list.size() >= scan_parallel_threshold
 			&& rowptr.size() - 1 >= 2 * pool->get_thread_count()) {
 			const size_t nrows = rowptr.size() - 1;
 			const size_t nthread = pool->get_thread_count();
@@ -1537,7 +1534,6 @@ namespace SparseRREF {
 		std::vector<std::vector<size_t>> entry_value(nthread, std::vector<size_t>(nlabels, 0));
 		std::vector<std::vector<size_t>> new_key(nthread, std::vector<size_t>(nlabels, 0));
 		std::vector<size_t> join_slot, new_slot, fuse_slot, drop_slot;
-		constexpr size_t par_join_nnz = 1u << 15;
 
 		for (size_t i = 0; i < nt; i++) {
 			if (acc.count == 0)
@@ -1639,7 +1635,7 @@ namespace SparseRREF {
 				}
 				};
 
-			if (pool != nullptr && nnz >= par_join_nnz) {
+			if (pool != nullptr && nnz >= join_parallel_threshold) {
 				auto fill = [&](const size_t ss, const size_t ee) {
 					const size_t id = thread_id();
 					for (size_t e = ss; e < ee; e++)

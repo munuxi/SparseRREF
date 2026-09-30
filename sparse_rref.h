@@ -155,12 +155,53 @@ namespace SparseRREF {
 
 	// thread pool
 	using thread_pool = BS::thread_pool<>;
+	// only call this from inside a pool task: off the pool get_index() is empty and value() throws
 	inline size_t thread_id() { return BS::this_thread::get_index().value(); }
+
+	// The entries of one range split into at most `nthread` consecutive blocks of (nearly) equal size,
+	// the larger ones first. This is the split the row wise passes hand to the pool, so one very long row
+	// is still processed by several threads; it is spelled out here because `BS::blocks` belongs to the
+	// pool header, not to this library.
+	struct entry_blocks_t {
+		size_t first = 0; // first entry of the range
+		size_t last = 0;  // one past its last entry
+		size_t block_size = 0;
+		size_t remainder = 0;
+		size_t nblk = 0;  // 0 for an empty range
+
+		entry_blocks_t(const size_t first_index, const size_t index_after_last, const size_t nthread) {
+			first = first_index;
+			last = index_after_last;
+			if (index_after_last <= first_index)
+				return;
+			const size_t total = index_after_last - first_index;
+			nblk = (nthread < total) ? nthread : total;
+			block_size = total / nblk;
+			remainder = total % nblk;
+		}
+		size_t start(const size_t blk) const { return first + blk * block_size + ((blk < remainder) ? blk : remainder); }
+		size_t end(const size_t blk) const { return (blk + 1 == nblk) ? last : start(blk + 1); }
+	};
+
+	// The library does not throw: a rejected call reports the reason on stderr -- in the "Error: ..."
+	// form the rest of the library uses -- and leaves the caller with an empty result (or, when the
+	// call is in place, with the object it was given). Bad input therefore cannot abort the CLI or the
+	// kernel through an uncaught exception.
+	inline void report_error(const char* what) { std::cerr << "Error: " << what << std::endl; }
+
+	// The thresholds at which work is handed to the pool, and the size of the counting tables. All of
+	// them are empirical: picked where the shared (or counted) form starts to pay for itself.
+	inline constexpr size_t sort_parallel_threshold = 1u << 14;    // parallel_sort(), the measured crossover
+	inline constexpr size_t product_parallel_threshold = 1u << 17; // tensor_product()
+	inline constexpr size_t pack_parallel_threshold = 1u << 17;    // tensor_contract()
+	inline constexpr size_t scan_parallel_threshold = 1u << 17;    // tensor_contract(), two indices
+	inline constexpr size_t join_parallel_threshold = 1u << 15;    // einstein_sum()
+	inline constexpr size_t counting_max_buckets = 1u << 20;       // the counting passes (gen_perm())
 
 	// A range sort that runs on our own pool: the caller's pool sizes the parallelism, so --threads
 	// governs it. It sort each block of the range in parallel, and then merges the sorted blocks.
 	template <typename RandomIt, typename Cmp>
-	void parallel_sort(RandomIt first, RandomIt last, Cmp&& cmp, thread_pool* pool, const size_t threshold = 1u << 14) {
+	void parallel_sort(RandomIt first, RandomIt last, Cmp&& cmp, thread_pool* pool, const size_t threshold = sort_parallel_threshold) {
 		const size_t n = static_cast<size_t>(last - first);
 		if (pool == nullptr || n < threshold || BS::this_thread::get_index().has_value())
 			return std::sort(first, last, cmp);
