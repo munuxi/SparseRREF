@@ -372,16 +372,9 @@ namespace SparseRREF {
 
 		template <typename U = T> requires std::is_same_v<U, rat_t>
 		sparse_vec<ulong, index_t> operator%(const ulong p) const {
-			sparse_vec<ulong, index_t> result;
 			nmod_t mod;
 			nmod_init(&mod, p);
-			result.reserve(_nnz);
-			result.resize(_nnz);
-			for (size_t i = 0; i < _nnz; i++) {
-				result.indices[i] = indices[i];
-				result.entries[i] = entries[i] % mod;
-			}
-			return result;
+			return *this % mod;
 		}
 
 		void canonicalize() {
@@ -1101,18 +1094,6 @@ namespace SparseRREF {
 			return { colptr + rowptr[i] * (rank - 1), valptr + rowptr[i] };
 		}
 
-		index_p entry_lower_bound(const_index_p l) {
-			auto begin = row(l[0]).first;
-			auto end = row(l[0] + 1).first;
-			if (begin == end)
-				return end;
-			return SparseRREF::lower_bound(begin, end, l + 1, rank - 1);
-		}
-
-		index_p entry_lower_bound(const index_v& l) {
-			return entry_lower_bound(l.data());
-		}
-
 		const_index_p entry_lower_bound(const_index_p l) const {
 			auto begin = row(l[0]).first;
 			auto end = row(l[0] + 1).first;
@@ -1125,17 +1106,12 @@ namespace SparseRREF {
 			return entry_lower_bound(l.data());
 		}
 
-		index_p entry_ptr(const index_p l) {
-			auto ptr = entry_lower_bound(l);
-			auto end = row(l[0] + 1).first;
-			if (ptr == end || std::equal(ptr, ptr + rank - 1, l + 1))
-				return ptr;
-			else
-				return end;
+		index_p entry_lower_bound(const_index_p l) {
+			return const_cast<index_p>(std::as_const(*this).entry_lower_bound(l));
 		}
 
-		index_p entry_ptr(const index_v& l) {
-			return entry_ptr(l.data());
+		index_p entry_lower_bound(const index_v& l) {
+			return const_cast<index_p>(std::as_const(*this).entry_lower_bound(l));
 		}
 
 		const_index_p entry_ptr(const_index_p l) const {
@@ -1143,81 +1119,76 @@ namespace SparseRREF {
 			auto end = row(l[0] + 1).first;
 			if (ptr == end || std::equal(ptr, ptr + rank - 1, l + 1))
 				return ptr;
-			else
-				return end;
+			return end;
 		}
 
 		const_index_p entry_ptr(const index_v& l) const {
 			return entry_ptr(l.data());
 		}
 
-		// unordered, push back on the end of the row
-		void push_back(const index_v& l, const T& val) {
-			index_t row = l[0];
-			size_t nnz = this->nnz();
+		index_p entry_ptr(const_index_p l) {
+			return const_cast<index_p>(std::as_const(*this).entry_ptr(l));
+		}
+
+		index_p entry_ptr(const index_v& l) {
+			return const_cast<index_p>(std::as_const(*this).entry_ptr(l));
+		}
+
+		// The one place where an entry is put into the buffer: make room at `index` by moving the whole
+		// tail of the buffer up by one entry, write the labels and the value there, and let every row
+		// from l[0] on count the new entry
+		void insert_at(const index_v& l, const T& val, const size_t index) {
+			const size_t nnz = this->nnz();
 			if (nnz + 1 > alloc)
 				reserve((alloc + 1) * 2);
-			size_t index = rowptr[row + 1];
 			for (size_t i = nnz; i > index; i--) {
 				auto tmpptr = colptr + (i - 1) * (rank - 1);
 				std::copy_backward(tmpptr, tmpptr + (rank - 1), tmpptr + 2 * (rank - 1));
 				valptr[i] = valptr[i - 1];
 			}
-			for (size_t i = 0; i < rank - 1; i++)
-				colptr[index * (rank - 1) + i] = l[i + 1];
+			std::copy(l.begin() + 1, l.begin() + rank, colptr + index * (rank - 1));
 			valptr[index] = val;
-			for (size_t i = row + 1; i <= dims[0]; i++)
+			for (size_t i = l[0] + 1; i <= dims[0]; i++)
 				rowptr[i]++;
 		}
 
-		// ordered insert
-		// mode = false: insert anyway
-		// mode = true: insert and replace if exist
-		void insert(const index_v& l, const T& val, bool mode = true) {
-			size_t trow = l[0];
-			size_t nnz = this->nnz();
-			if (nnz + 1 > alloc)
-				reserve((alloc + 1) * 2);
-			auto ptr = entry_lower_bound(l);
-			size_t index = (ptr - colptr) / (rank - 1);
-			bool exist = (ptr != row(trow + 1).first && std::equal(ptr, ptr + rank - 1, l.data() + 1));
-			if (!exist || !mode) {
-				for (size_t i = nnz; i > index; i--) {
-					auto tmpptr = colptr + (i - 1) * (rank - 1);
-					std::copy_backward(tmpptr, tmpptr + (rank - 1), tmpptr + 2 * (rank - 1));
-					valptr[i] = valptr[i - 1];
-				}
-				std::copy(l.begin() + 1, l.begin() + rank, colptr + index * (rank - 1));
-				valptr[index] = val;
-				for (size_t i = trow + 1; i <= dims[0]; i++)
-					rowptr[i]++;
+		// where an ordered search puts l, and whether that position already holds it (the search never
+		// leaves the row of l[0]; a caller that replaces an entry neither of them changes the nnz)
+		size_t entry_pos(const index_v& l) const {
+			return (entry_lower_bound(l) - colptr) / (rank - 1);
+		}
+
+		bool entry_is(const index_v& l, const size_t pos) const {
+			if (pos == rowptr[l[0] + 1])
+				return false;
+			auto ptr = colptr + pos * (rank - 1);
+			return std::equal(ptr, ptr + (rank - 1), l.data() + 1);
+		}
+
+		// unordered, push back on the end of the row
+		void push_back(const index_v& l, const T& val) {
+			insert_at(l, val, rowptr[l[0] + 1]);
+		}
+
+		// ordered insert: mode = true replaces an entry that is already there, mode = false inserts a
+		// second copy of it; insert_add() adds to the entry instead of replacing it
+		void insert(const index_v& l, const T& val, const bool mode = true) {
+			const size_t pos = entry_pos(l);
+			if (mode && entry_is(l, pos)) {
+				valptr[pos] = val;
 				return;
 			}
-			valptr[index] = val;
+			insert_at(l, val, pos);
 		}
 
 		// ordered add one value
 		void insert_add(const index_v& l, const T& val) {
-			size_t trow = l[0];
-			size_t nnz = this->nnz();
-			if (nnz + 1 > alloc)
-				reserve((alloc + 1) * 2);
-			auto ptr = entry_lower_bound(l);
-			size_t index = (ptr - colptr) / (rank - 1);
-			bool exist = (ptr != row(trow + 1).first && std::equal(ptr, ptr + rank - 1, l.data() + 1));
-			if (!exist) {
-				for (size_t i = nnz; i > index; i--) {
-					auto tmpptr = colptr + (i - 1) * (rank - 1);
-					std::copy_backward(tmpptr, tmpptr + (rank - 1), tmpptr + 2 * (rank - 1));
-					valptr[i] = valptr[i - 1];
-				}
-				std::copy(l.begin() + 1, l.begin() + rank, colptr + index * (rank - 1));
-				valptr[index] = val;
-				for (size_t i = trow + 1; i <= dims[0]; i++)
-					rowptr[i]++;
+			const size_t pos = entry_pos(l);
+			if (entry_is(l, pos)) {
+				valptr[pos] += val;
 				return;
 			}
-			valptr[index] += val;
+			insert_at(l, val, pos);
 		}
 
 		/**
@@ -2281,17 +2252,17 @@ namespace SparseRREF {
 				data.rowptr[i + 1] = data.rowptr[i] + mat[i].nnz();
 			}
 			// copy the values and column indices
+			// one row body, run by the pool or in a plain loop
+			auto copy_row = [&](const size_t i) {
+				std::copy(mat[i].indices, mat[i].indices + mat[i].nnz(), data.colptr + data.rowptr[i]);
+				std::copy(mat[i].entries, mat[i].entries + mat[i].nnz(), data.valptr + data.rowptr[i]);
+				};
 			if (pool == nullptr) {
-				for (size_t i = 0; i < mat.nrow; i++) {
-					std::copy(mat[i].indices, mat[i].indices + mat[i].nnz(), data.colptr + data.rowptr[i]);
-					std::copy(mat[i].entries, mat[i].entries + mat[i].nnz(), data.valptr + data.rowptr[i]);
-				}
+				for (size_t i = 0; i < mat.nrow; i++)
+					copy_row(i);
 			}
 			else {
-				pool->detach_loop(0, mat.nrow, [&](size_t i) {
-					std::copy(mat[i].indices, mat[i].indices + mat[i].nnz(), data.colptr + data.rowptr[i]);
-					std::copy(mat[i].entries, mat[i].entries + mat[i].nnz(), data.valptr + data.rowptr[i]);
-					});
+				pool->detach_loop(0, mat.nrow, copy_row);
 				pool->wait();
 			}
 			if (sort_ind && !check_sorted())
@@ -2305,23 +2276,20 @@ namespace SparseRREF {
 			}
 
 			sparse_mat<T, index_t> mat(data.dims[0], data.dims[1]);
+			// one row body, run by the pool or in a plain loop
+			auto copy_row = [&](const size_t i) {
+				const size_t nz = data.rowptr[i + 1] - data.rowptr[i];
+				mat[i].reserve(nz);
+				mat[i].resize(nz);
+				std::copy(data.colptr + data.rowptr[i], data.colptr + data.rowptr[i + 1], mat[i].indices);
+				std::copy(data.valptr + data.rowptr[i], data.valptr + data.rowptr[i + 1], mat[i].entries);
+				};
 			if (pool == nullptr) {
-				for (size_t i = 0; i < data.dims[0]; i++) {
-					auto nz = data.rowptr[i + 1] - data.rowptr[i];
-					mat[i].reserve(nz);
-					mat[i].resize(nz);
-					std::copy(data.colptr + data.rowptr[i], data.colptr + data.rowptr[i + 1], mat[i].indices);
-					std::copy(data.valptr + data.rowptr[i], data.valptr + data.rowptr[i + 1], mat[i].entries);
-				}
+				for (size_t i = 0; i < data.dims[0]; i++)
+					copy_row(i);
 			}
 			else {
-				pool->detach_loop(0, data.dims[0], [&](size_t i) {
-					auto nz = data.rowptr[i + 1] - data.rowptr[i];
-					mat[i].reserve(nz);
-					mat[i].resize(nz);
-					std::copy(data.colptr + data.rowptr[i], data.colptr + data.rowptr[i + 1], mat[i].indices);
-					std::copy(data.valptr + data.rowptr[i], data.valptr + data.rowptr[i + 1], mat[i].entries);
-					});
+				pool->detach_loop(0, data.dims[0], copy_row);
 				pool->wait();
 			}
 			return mat;
@@ -2598,33 +2566,25 @@ namespace SparseRREF {
 			auto rptr = rowptr();
 
 			sparse_mat<T, index_t> mat(r, c);
+			// one row body, run by the pool or in a plain loop
+			auto copy_row = [&](const size_t i) {
+				const size_t nz = rptr[i + 1] - rptr[i];
+				mat[i].reserve(nz);
+				mat[i].resize(nz);
+				if (nz == 0)
+					return;
+				std::copy(data.valptr + rptr[i], data.valptr + rptr[i + 1], mat[i].entries);
+				// skip the first index, which is the row index
+				auto ptr = index(rptr[i]) + 1;
+				for (size_t j = 0; j < nz; j++)
+					mat[i].indices[j] = ptr[2 * j];
+				};
 			if (pool == nullptr) {
-				for (size_t i = 0; i < r; i++) {
-					auto nz = rptr[i + 1] - rptr[i];
-					mat[i].reserve(nz);
-					mat[i].resize(nz);
-					if (nz == 0)
-						continue;
-					std::copy(data.valptr + rptr[i], data.valptr + rptr[i + 1], mat[i].entries);
-					// skip the first index, which is the row index
-					auto ptr = index(rptr[i]) + 1;
-					for (size_t j = 0; j < nz; j++)
-						mat[i].indices[j] = ptr[2 * j];
-				}
+				for (size_t i = 0; i < r; i++)
+					copy_row(i);
 			}
 			else {
-				pool->detach_loop(0, r, [&](size_t i) {
-					auto nz = rptr[i + 1] - rptr[i];
-					mat[i].reserve(nz);
-					mat[i].resize(nz);
-					if (nz == 0)
-						return;
-					std::copy(data.valptr + rptr[i], data.valptr + rptr[i + 1], mat[i].entries);
-					// skip the first index, which is the row index
-					auto ptr = index(rptr[i]) + 1;
-					for (size_t j = 0; j < nz; j++)
-						mat[i].indices[j] = ptr[2 * j];
-					});
+				pool->detach_loop(0, r, copy_row);
 				pool->wait();
 			}
 			return mat;
@@ -2807,28 +2767,6 @@ namespace SparseRREF {
 			return result;
 		}
 
-		// constructor from CSR
-		sparse_tensor(const sparse_tensor<T, index_t, SPARSE_CSR>& l) {
-			data.init(prepend_num(l.dims(), (size_t)1), l.nnz());
-			resize(l.nnz());
-
-			auto r = rank();
-			auto n_row = dim(0);
-
-			// first copy the data
-			s_copy(data.valptr, l.data.valptr, l.nnz());
-
-			// then deal with the indices
-			for (size_t i = 0; i < n_row; i++) {
-				for (size_t j = l.data.rowptr[i]; j < l.data.rowptr[i + 1]; j++) {
-					auto tmp_index = index(j);
-					tmp_index[0] = i;
-					for (size_t k = 0; k < r - 1; k++)
-						tmp_index[k + 1] = l.data.colptr[j * (r - 1) + k];
-				}
-			}
-		}
-
 		sparse_tensor& operator=(const sparse_tensor<T, index_t, SPARSE_CSR>& l) {
 			if (alloc() == 0) {
 				init(l.dims(), l.nnz());
@@ -2857,6 +2795,8 @@ namespace SparseRREF {
 
 			return *this;
 		}
+
+		sparse_tensor(const sparse_tensor<T, index_t, SPARSE_CSR>& l) { *this = l; }
 
 		// The stolen data is in the CSR layout; turn it into the COO one: the row index goes in
 		// front of every entry, rowptr becomes {0, nnz} (which frees the CSR row pointer array),
@@ -2927,20 +2867,20 @@ namespace SparseRREF {
 	sparse_mat<T, index_t> sparse_mat_join(const sparse_mat<T, index_t>& A, const sparse_mat<T, index_t>& B, thread_pool* pool = nullptr) {
 		sparse_mat<T, index_t> res(A.nrow + B.nrow, std::max(A.ncol, B.ncol));
 
-		if (pool == nullptr) {
-			std::copy(A.rows.begin(), A.rows.end(), res.rows.begin());
-			std::copy(B.rows.begin(), B.rows.end(), res.rows.begin() + A.nrow);
-		}
-		else {
-			pool->detach_loop(0, A.nrow, [&](size_t i) {
-				res[i] = A[i];
-				});
-			pool->wait();
-			pool->detach_loop(0, B.nrow, [&](size_t i) {
-				res[i + A.nrow] = B[i];
-				});
-			pool->wait();
-		}
+		// one row body, run by the pool or in a plain loop: the same in both branches
+		auto append_rows = [&](const sparse_mat<T, index_t>& src, const size_t offset) {
+			auto copy_row = [&](const size_t i) { res[i + offset] = src[i]; };
+			if (pool == nullptr) {
+				for (size_t i = 0; i < src.nrow; i++)
+					copy_row(i);
+			}
+			else {
+				pool->detach_loop(0, src.nrow, copy_row);
+				pool->wait();
+			}
+			};
+		append_rows(A, 0);
+		append_rows(B, A.nrow);
 
 		return res;
 	}
@@ -2964,20 +2904,20 @@ namespace SparseRREF {
 		sparse_mat<T, index_t> A(split_row, mat.ncol);
 		sparse_mat<T, index_t> B(mat.nrow - split_row, mat.ncol);
 
-		if (pool == nullptr) {
-			std::copy(mat.rows.begin(), mat.rows.begin() + split_row, A.rows.begin());
-			std::copy(mat.rows.begin() + split_row, mat.rows.end(), B.rows.begin());
-		}
-		else {
-			pool->detach_loop(0, split_row, [&](size_t i) {
-				A[i] = mat[i];
-				});
-			pool->wait();
-			pool->detach_loop(split_row, mat.nrow, [&](size_t i) {
-				B[i - split_row] = mat[i];
-				});
-			pool->wait();
-		}
+		auto split_into = [&](sparse_mat<T, index_t>& dst, const size_t first) {
+			const size_t n = dst.nrow;
+			auto copy_row = [&](const size_t i) { dst[i] = mat[first + i]; };
+			if (pool == nullptr) {
+				for (size_t i = 0; i < n; i++)
+					copy_row(i);
+			}
+			else {
+				pool->detach_loop(0, n, copy_row);
+				pool->wait();
+			}
+			};
+		split_into(A, 0);
+		split_into(B, split_row);
 
 		return { A, B };
 	}

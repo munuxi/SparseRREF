@@ -694,15 +694,14 @@ namespace SparseRREF {
 		}
 	};
 
-	template <typename T> inline T* binary_search(T* begin, T* end, T val) {
+	template <typename T> inline const T* binary_search(const T* begin, const T* end, const T val) {
 		auto ptr = std::lower_bound(begin, end, val);
 		if (ptr == end || *ptr == val)
 			return ptr;
-		else
-			return end;
+		return end;
 	}
 
-	template <typename T> inline T* lower_bound(T* begin, T* end, const T* val, size_t rank) {
+	template <typename It, typename T> inline It lower_bound(It begin, It end, const T* val, const size_t rank) {
 		if (rank == 1)
 			return std::lower_bound(begin, end, *val);
 
@@ -720,12 +719,11 @@ namespace SparseRREF {
 		return begin + rank * left;
 	}
 
-	template <typename T> inline T* binary_search(T* begin, T* end, uint16_t rank, T* val) {
-		auto ptr = SparseRREF::lower_bound(begin, end, rank, val);
+	template <typename T> inline const T* binary_search(const T* begin, const T* end, const T* val, const size_t rank) {
+		auto ptr = SparseRREF::lower_bound(begin, end, val, rank);
 		if (ptr == end || std::equal(ptr, ptr + rank, val))
 			return ptr;
-		else
-			return end;
+		return end;
 	}
 
 	template <typename T>
