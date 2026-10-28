@@ -468,6 +468,7 @@ namespace SparseRREF {
 
 		sparse_vec(const sparse_vec& l) { copy(l); }
 		size_t nnz() const { return _nnz; }
+		size_t size() const { return _nnz; }
 		size_t alloc() const { return _alloc; }
 
 		sparse_vec(sparse_vec&& l) noexcept {
@@ -513,8 +514,29 @@ namespace SparseRREF {
 				_nnz--;
 		}
 
+		// // the entry with this index, or nullptr when there is none
+		// const bool* find(const index_t index, const bool isbinary = true) const {
+		// 	if (_nnz == 0)
+		// 		return nullptr;
+		// 	const index_t* ptr;
+		// 	if (isbinary)
+		// 		ptr = SparseRREF::binary_search(indices, indices + _nnz, index);
+		// 	else
+		// 		ptr = std::find(indices, indices + _nnz, index);
+		// 	if (ptr == indices + _nnz)
+		// 		return nullptr;
+		// 	return entries + (ptr - indices);
+		// }
+
+		// bool* find(const index_t index, const bool isbinary = true) {
+		// 	return const_cast<T*>(std::as_const(*this).find(index, isbinary));
+		// }
+
 		index_t& operator()(const size_t pos) { return indices[pos]; }
 		const index_t& operator()(const size_t pos) const { return indices[pos]; }
+		bool operator[](const size_t pos) { return true; };
+		// const bool operator[](const size_t pos) { return true; };
+
 		void zero() { _nnz = 0; }
 		void sort_indices() { std::sort(indices, indices + _nnz); }
 		void canonicalize() {}
