@@ -468,6 +468,7 @@ namespace SparseRREF {
 
 		sparse_vec(const sparse_vec& l) { copy(l); }
 		size_t nnz() const { return _nnz; }
+		size_t size() const { return _nnz; }
 		size_t alloc() const { return _alloc; }
 
 		sparse_vec(sparse_vec&& l) noexcept {
@@ -515,6 +516,9 @@ namespace SparseRREF {
 
 		index_t& operator()(const size_t pos) { return indices[pos]; }
 		const index_t& operator()(const size_t pos) const { return indices[pos]; }
+		bool operator[](const size_t pos) { return true; };
+		const bool operator[](const size_t pos) { return true; };
+
 		void zero() { _nnz = 0; }
 		void sort_indices() { std::sort(indices, indices + _nnz); }
 		void canonicalize() {}
