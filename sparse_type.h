@@ -404,6 +404,28 @@ namespace SparseRREF {
 			permute(perm, entries);
 		}
 
+		// Entries that share an index add up, so a coordinate file that lists a position more than once
+		// means one entry holding the sum; the algorithms of the library assume one entry per position.
+		void merge_duplicates(const field_t& F) {
+			if (_nnz <= 1)
+				return;
+
+			sort_indices();
+			size_t out = 1;
+			for (size_t i = 1; i < _nnz; i++) {
+				if (indices[out - 1] == indices[i]) {
+					entries[out - 1] = scalar_add(entries[out - 1], entries[i], F);
+				}
+				else {
+					indices[out] = indices[i];
+					entries[out] = entries[i];
+					out++;
+				}
+			}
+			_nnz = out;
+			canonicalize(); // a sum that cancels leaves no entry
+		}
+
 		void compress() {
 			canonicalize();
 			sort_indices();

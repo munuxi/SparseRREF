@@ -877,11 +877,34 @@ namespace SparseRREF {
 		}
 	};
 
+	// The strategy of the Schur update below. The dense one asks the set of the columns present in the
+	// row about every pivot column; the buffered one keeps a histogram of that set, so that an absent
+	// pivot column is rejected with one read of a small array before the set is consulted. The dense
+	// case uses an empty filter, so its loop compiles to exactly what it was before.
+	struct no_pivot_filter {
+		bool absent(const size_t) const { return false; }
+		void add(const size_t) {}
+		void remove(const size_t) {}
+	};
+
+	template <size_t buffer_bit>
+	struct pivot_histogram {
+		static constexpr size_t buffer_size = (size_t)1 << buffer_bit;
+		std::array<size_t, buffer_size> buffer = { 0 };
+
+		bool absent(const size_t c) const { return buffer[c % buffer_size] == 0; }
+		void add(const size_t ind) { buffer[ind % buffer_size]++; }
+		void remove(const size_t ind) { buffer[ind % buffer_size]--; }
+	};
+
 	// make sure nonzero_c and tmpvec are cleared before calling this function
 	// after this function, nonzero_c and tmpvec are also cleared
-	template <typename T, typename index_t>
+	// the pivots must have distinct rows and distinct columns, none of them row k: a column given twice
+	// would be inserted into and erased from the set twice, which desynchronises its count
+	template <typename T, typename index_t, typename Filter = no_pivot_filter>
+		requires (!std::is_same_v<T, bool>)
 	void schur_complete(sparse_mat<T, index_t>& mat, size_t k,
-		const std::vector<pivot_t<index_t>>& pivots, 
+		const std::vector<pivot_t<index_t>>& pivots,
 		const field_t& F, schur_helper<T, index_t>& helper) {
 
 		if (mat[k].nnz() == 0)
@@ -892,15 +915,17 @@ namespace SparseRREF {
 		auto& add_list = *helper.add_list;
 		auto& remove_list = *helper.remove_list;
 
+		Filter filter;
 		for (auto [ind, val] : mat[k]) {
 			nonzero_c.insert(ind);
 			tmpvec[ind] = val;
+			filter.add(ind);
 		}
 
 		ulong e_pr;
 		auto pp = F.get_prime();
 		for (auto [r, c] : pivots) {
-			if (!nonzero_c.test(c))
+			if (filter.absent(c) || !nonzero_c.test(c))
 				continue;
 
 			T entry = tmpvec[c];
@@ -930,8 +955,14 @@ namespace SparseRREF {
 						add_list.push_back(ind);
 				}
 			}
-			for (auto ind : add_list) nonzero_c.insert(ind);
-			for (auto ind : remove_list) nonzero_c.erase(ind);
+			for (auto ind : add_list) {
+				nonzero_c.insert(ind);
+				filter.add(ind);
+			}
+			for (auto ind : remove_list) {
+				nonzero_c.erase(ind);
+				filter.remove(ind);
+			}
 		}
 
 		auto nnz = nonzero_c.nnz();
@@ -974,84 +1005,30 @@ namespace SparseRREF {
 		nonzero_c.nonzero_and_clear(mat[k].indices);
 	}
 
+	// the buffered strategy: a histogram of the row rejects an absent pivot column with one array read
 	template <typename T, typename index_t, size_t buffer_bit>
 	void schur_complete_buffer(sparse_mat<T, index_t>& mat, size_t k,
 		const std::vector<pivot_t<index_t>>& pivots,
 		const field_t& F, schur_helper<T, index_t>& helper) {
 
 		if constexpr (std::is_same_v<T, bool>) {
-			schur_complete(mat, k, pivots, F, helper);
-			return;
+			schur_complete(mat, k, pivots, F, helper); // a bool row has no values to update
 		}
-
-		if (mat[k].nnz() == 0)
-			return;
-
-		T* tmpvec = helper.cache_densed_vec;
-		auto& nonzero_c = *helper.nonzero_c;
-		auto& add_list = *helper.add_list;
-		auto& remove_list = *helper.remove_list;
-
-		constexpr size_t buffer_size = (size_t)1 << buffer_bit;
-
-		std::array<size_t, buffer_size> buffer = { 0 };
-		for (auto [ind, val] : mat[k]) {
-			nonzero_c.insert(ind);
-			tmpvec[ind] = val;
-			buffer[ind % buffer_size]++;
+		else {
+			schur_complete<T, index_t, pivot_histogram<buffer_bit>>(mat, k, pivots, F, helper);
 		}
+	}
 
-		ulong e_pr;
-		auto pp = F.get_prime();
-		for (auto [r, c] : pivots) {
-			if (buffer[c % buffer_size] == 0)
-				continue;
-			if (!nonzero_c.test(c))
-				continue;
-
-			T entry = tmpvec[c];
-			add_list.clear();
-			remove_list.clear();
-
-			if constexpr (std::is_same_v<T, ulong>) {
-				e_pr = n_mulmod_precomp_shoup(tmpvec[c], pp);
-			}
-			for (auto [ind, val] : mat[r]) {
-				bool old_c = tmpvec[ind] == 0;
-				if constexpr (std::is_same_v<T, ulong>) {
-					tmpvec[ind] = _nmod_sub(tmpvec[ind],
-						n_mulmod_shoup(entry, val, e_pr, pp), F.mod);
-				}
-				else if constexpr (std::is_same_v<T, rat_t>) {
-					tmpvec[ind] -= entry * val;
-				}
-				else {
-					tmpvec[ind] = scalar_sub(tmpvec[ind], scalar_mul(entry, val, F), F);
-				}
-				if (tmpvec[ind] == 0) {
-					remove_list.push_back(ind);
-				}
-				else {
-					if (old_c)
-						add_list.push_back(ind);
-				}
-			}
-			for (auto ind : add_list) {
-				nonzero_c.insert(ind);
-				buffer[ind % buffer_size]++;
-			}
-			for (auto ind : remove_list) {
-				nonzero_c.erase(ind);
-				buffer[ind % buffer_size]--;
-			}
-		}
-
-		auto nnz = nonzero_c.nnz();
-		if (mat[k].alloc() < nnz) {
-			mat[k].reserve(nnz, false);
-		}
-		mat[k].resize(nnz);
-		nonzero_c.nonzero_and_clear(mat[k].indices, tmpvec, mat[k].entries);
+	// The strategy for a matrix of this density: once a fair share of the pivot columns is present in a
+	// row the set test is answered by the cache anyway, and below that the histogram of the buffered
+	// strategy rejects most pivot columns without touching the set.
+	template <typename T, typename index_t>
+	auto schur_strategy(const double density) {
+		using func_t = void (*)(sparse_mat<T, index_t>&, size_t, const std::vector<pivot_t<index_t>>&,
+			const field_t&, schur_helper<T, index_t>&);
+		if (100 * density > 0.01)
+			return func_t(&schur_complete<T, index_t>);
+		return func_t(&schur_complete_buffer<T, index_t, 10>);
 	}
 
 	// Progress bookkeeping of the triangular back substitution, shared by all
@@ -1116,9 +1093,7 @@ namespace SparseRREF {
 			int bitlen_nrow = num_digits(rank);
 
 			double density = (double)now_nnz / (mat.nrow * mat.ncol);
-			auto schur_complete_func = &schur_complete_buffer<T, index_t, 10>;
-			if (100 * density > 0.01)
-				schur_complete_func = &schur_complete<T, index_t>;
+			auto schur_complete_func = schur_strategy<T, index_t>(density);
 
 			std::atomic<size_t> cc = 0;
 			pool.detach_blocks<size_t>(0, leftrows.size(), [&](const size_t s, const size_t e) {
@@ -1255,9 +1230,7 @@ namespace SparseRREF {
 		}
 
 		double density = (double)(nnz) / (total_rank * mat.ncol);
-		auto schur_complete_func = &schur_complete_buffer<T, index_t, 10>;
-		if (100 * density > 0.01)
-			schur_complete_func = &schur_complete<T, index_t>;
+		auto schur_complete_func = schur_strategy<T, index_t>(density);
 
 		std::vector<size_t> leftrows;
 		leftrows.reserve(total_rank);
@@ -1348,9 +1321,7 @@ namespace SparseRREF {
 		size_t rank = pivots[0].size();
 
 		double density = (double)mat.nnz() / (total_rank * mat.ncol);
-		auto schur_complete_func = &schur_complete_buffer<T, index_t, 10>;
-		if (100 * density > 0.01)
-			schur_complete_func = &schur_complete<T, index_t>;
+		auto schur_complete_func = schur_strategy<T, index_t>(density);
 
 		std::vector<size_t> leftrows;
 		leftrows.reserve(total_rank);
@@ -1474,9 +1445,7 @@ namespace SparseRREF {
 
 		size_t now_nnz = mat.nnz();
 		double density = (double)now_nnz / (mat.nrow * mat.ncol);
-		auto schur_complete_func = &schur_complete_buffer<T, index_t, 10>;
-		if (100 * density > 0.01)
-			schur_complete_func = &schur_complete<T, index_t>;
+		auto schur_complete_func = schur_strategy<T, index_t>(density);
 
 		if (opt->abort)
 			return pivots;
@@ -2228,6 +2197,8 @@ namespace SparseRREF {
 		std::string line;
 		std::vector<size_t> dims;
 		sparse_mat<T, index_t> mat;
+		size_t declared_nnz = 0, entries_read = 0;
+		bool has_declared_nnz = false;
 
 		while (std::getline(st, line)) {
 			if (line.empty() || line[0] == '%')
@@ -2248,7 +2219,11 @@ namespace SparseRREF {
 				end = line.find(' ', start);
 			}
 			if (start < line.size()) {
-				// size_t nnz = 0; string_to_ull(line.substr(start), nnz);
+				// the third number of a coordinate header is the entry count; an SMS header carries a
+				// type letter there instead, and that one is not a number and is not checked
+				uint64_t declared = 0;
+				has_declared_nnz = string_to_ull(line.substr(start), declared);
+				declared_nnz = static_cast<size_t>(declared);
 				if (dims.size() != 2) {
 					std::cerr << "Error: sparse_mat_read: wrong format in the matrix file" << std::endl;
 					return sparse_mat<T, index_t>();
@@ -2319,8 +2294,24 @@ namespace SparseRREF {
 				return sparse_mat<T, index_t>();
 			}
 
+			// the indices come from the file: a malformed one must not index the rows of the matrix
+			if (rowcol[0] >= mat.nrow || rowcol[1] >= mat.ncol) {
+				report_error("sparse_mat_read: an index is out of range");
+				return sparse_mat<T, index_t>();
+			}
+
+			entries_read++;
 			mat[rowcol[0]].push_back(rowcol[1], val);
 		}
+
+		if (has_declared_nnz && entries_read != declared_nnz) {
+			report_error("sparse_mat_read: the number of entries does not match the header");
+			return sparse_mat<T, index_t>();
+		}
+
+		// a position listed more than once means one entry holding the sum of its values
+		for (size_t i = 0; i < mat.nrow; i++)
+			mat[i].merge_duplicates(F);
 
 		return mat;
 	}
@@ -2331,12 +2322,24 @@ namespace SparseRREF {
 		case SPARSE_FILE_TYPE_PLAIN:
 			st << mat.nrow << ' ' << mat.ncol << ' ' << mat.nnz() << '\n';
 			break;
-		case SPARSE_FILE_TYPE_MTX:
-			if constexpr (std::is_same_v<T, ulong>) {
+		case SPARSE_FILE_TYPE_MTX: {
+			// MatrixMarket has no field for rationals: such a matrix keeps the p/q values the library
+			// reads back, and its header announces them as a "rational" field instead of claiming
+			// integers; an integral matrix keeps the standard header
+			if constexpr (std::is_same_v<T, rat_t>) {
+				bool integral = true;
+				for (size_t i = 0; i < mat.nrow && integral; i++)
+					for (size_t j = 0; j < mat[i].nnz() && integral; j++)
+						integral = mat[i].entries[j].is_integer();
+				st << (integral ? "%%MatrixMarket matrix coordinate integer general\n"
+					: "%%MatrixMarket matrix coordinate rational general\n");
+			}
+			else if constexpr (std::is_same_v<T, ulong> || std::is_same_v<T, int_t>) {
 				st << "%%MatrixMarket matrix coordinate integer general\n";
 			}
 			st << mat.nrow << ' ' << mat.ncol << ' ' << mat.nnz() << '\n';
 			break;
+		}
 		case SPARSE_FILE_TYPE_SMS: {
 			char type_char =
 				std::is_same_v<T, rat_t> ? 'Q' :

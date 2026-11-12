@@ -282,7 +282,7 @@ namespace SparseRREF {
 
 		Encoder enc = fullform_to_wxf(ff_template, func_map, include_head);
 
-		return enc.buffer;
+		return std::move(enc.buffer); // the buffer is the whole file: do not copy it
 	}
 
 	// SparseArray[Automatic,dims,imp_val = 0,{1,{rowptr,colindex},vals}]
@@ -735,7 +735,7 @@ namespace SparseRREF {
 
 		Encoder enc = fullform_to_wxf(ff_template, func_map, include_head);
 
-		return enc.buffer;
+		return std::move(enc.buffer); // the buffer is the whole file: do not copy it
 	}
 
 }

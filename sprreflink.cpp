@@ -102,6 +102,11 @@
 
 using namespace SparseRREF;
 
+// The thread count the kernel passes: 0 asks for one thread per core, which the pool understands, and
+// a negative or absurd value is rejected here instead of becoming a huge size_t when the pool is built.
+static bool valid_nthreads(const mint n) {
+	return n >= 0 && n <= 4096;
+}
 EXTERN_C DLLEXPORT mint WolframLibrary_getVersion() {
     return WolframLibraryVersion;
 }
@@ -368,6 +373,8 @@ EXTERN_C DLLEXPORT int sprref_mod_tensor_contract(WolframLibraryData ld, mint Ar
 	auto indexA = MArgument_getMTensor(Args[3]);
 	auto indexB = MArgument_getMTensor(Args[4]);
 	auto nthreads = MArgument_getInteger(Args[5]);
+	if (!valid_nthreads(nthreads))
+		return LIBRARY_FUNCTION_ERROR;
 
 	if (ld->MTensor_getRank(indexA) != 1 || ld->MTensor_getRank(indexB) != 1)
 		return LIBRARY_FUNCTION_ERROR;
@@ -424,6 +431,8 @@ EXTERN_C DLLEXPORT int sprref_rat_tensor_contract(WolframLibraryData ld, mint Ar
 	auto indexA = MArgument_getMTensor(Args[2]);
 	auto indexB = MArgument_getMTensor(Args[3]);
 	auto nthreads = MArgument_getInteger(Args[4]);
+	if (!valid_nthreads(nthreads))
+		return LIBRARY_FUNCTION_ERROR;
 	numericarray_data_t type = MNumericArray_Type_Undef;
 	auto naFuns = ld->numericarrayLibraryFunctions;
 
@@ -519,6 +528,8 @@ EXTERN_C DLLEXPORT int sprref_mod_matmul(WolframLibraryData ld, mint Argc, MArgu
 	auto matB = MArgument_getMSparseArray(Args[1]);
 	auto p = MArgument_getInteger(Args[2]);
 	auto nthreads = MArgument_getInteger(Args[3]);
+	if (!valid_nthreads(nthreads))
+		return LIBRARY_FUNCTION_ERROR;
 	auto sf = ld->sparseLibraryFunctions;
 	auto ranksA = sf->MSparseArray_getRank(matA);
 	if (ranksA != 2 && sf->MSparseArray_getImplicitValue(matA) != 0)
@@ -554,6 +565,8 @@ EXTERN_C DLLEXPORT int sprref_rat_matmul(WolframLibraryData ld, mint Argc, MArgu
 	auto na_inA = MArgument_getMNumericArray(Args[0]);
 	auto na_inB = MArgument_getMNumericArray(Args[1]);
 	auto nthreads = MArgument_getInteger(Args[2]);
+	if (!valid_nthreads(nthreads))
+		return LIBRARY_FUNCTION_ERROR;
 
 	numericarray_data_t type = MNumericArray_Type_Undef;
 	auto naFuns = ld->numericarrayLibraryFunctions;
@@ -843,6 +856,8 @@ EXTERN_C DLLEXPORT int sprref_mod_rref(WolframLibraryData ld, mint Argc, MArgume
 	auto method = MArgument_getInteger(Args[3]);
 	auto is_back_sub = MArgument_getBoolean(Args[4]);
 	auto nthreads = MArgument_getInteger(Args[5]);
+	if (!valid_nthreads(nthreads))
+		return LIBRARY_FUNCTION_ERROR;
 	auto verbose = MArgument_getBoolean(Args[6]);
 	auto print_step = MArgument_getInteger(Args[7]);
 	auto log_to_kernel = MArgument_getBoolean(Args[8]);
@@ -1034,6 +1049,8 @@ EXTERN_C DLLEXPORT int sprref_mod_rref_task(WolframLibraryData ld, mint Argc, MA
 	auto method = MArgument_getInteger(Args[3]);
 	auto is_back_sub = MArgument_getBoolean(Args[4]);
 	auto nthreads = MArgument_getInteger(Args[5]);
+	if (!valid_nthreads(nthreads))
+		return LIBRARY_FUNCTION_ERROR;
 	auto print_step = MArgument_getInteger(Args[6]);
 	auto naFuns = ld->numericarrayLibraryFunctions;
 
@@ -1084,6 +1101,8 @@ EXTERN_C DLLEXPORT int sprref_rat_rref(WolframLibraryData ld, mint Argc, MArgume
 	auto method = MArgument_getInteger(Args[2]);
 	auto is_back_sub = MArgument_getBoolean(Args[3]);
 	auto nthreads = MArgument_getInteger(Args[4]);
+	if (!valid_nthreads(nthreads))
+		return LIBRARY_FUNCTION_ERROR;
 	auto verbose = MArgument_getBoolean(Args[5]);
 	auto print_step = MArgument_getInteger(Args[6]);
 	auto log_to_kernel = MArgument_getBoolean(Args[7]);
@@ -1223,6 +1242,8 @@ EXTERN_C DLLEXPORT int sprref_rat_rref_task(WolframLibraryData ld, mint Argc, MA
 	auto method = MArgument_getInteger(Args[2]);
 	auto is_back_sub = MArgument_getBoolean(Args[3]);
 	auto nthreads = MArgument_getInteger(Args[4]);
+	if (!valid_nthreads(nthreads))
+		return LIBRARY_FUNCTION_ERROR;
 	auto print_step = MArgument_getInteger(Args[5]);
 	auto naFuns = ld->numericarrayLibraryFunctions;
 
@@ -1261,6 +1282,8 @@ EXTERN_C DLLEXPORT int sprref_mod_matinv(WolframLibraryData ld, mint Argc, MArgu
 	auto mat_in = MArgument_getMSparseArray(Args[0]);
 	auto p = MArgument_getInteger(Args[1]);
 	auto nthreads = MArgument_getInteger(Args[2]);
+	if (!valid_nthreads(nthreads))
+		return LIBRARY_FUNCTION_ERROR;
 	auto sf = ld->sparseLibraryFunctions;
 	auto ranks = sf->MSparseArray_getRank(mat_in);
 	if (ranks != 2 && sf->MSparseArray_getImplicitValue(mat_in) != 0)
@@ -1289,6 +1312,8 @@ EXTERN_C DLLEXPORT int sprref_rat_matinv(WolframLibraryData ld, mint Argc, MArgu
 		return LIBRARY_FUNCTION_ERROR;
 	auto na_in = MArgument_getMNumericArray(Args[0]);
 	auto nthreads = MArgument_getInteger(Args[1]);
+	if (!valid_nthreads(nthreads))
+		return LIBRARY_FUNCTION_ERROR;
 
 	numericarray_data_t type = MNumericArray_Type_Undef;
 	auto naFuns = ld->numericarrayLibraryFunctions;
