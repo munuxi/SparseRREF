@@ -212,7 +212,7 @@ namespace Flint {
 
 		void canonicalize() { fmpq_canonicalise(&_data); }
 
-		template <signed_builtin_integral T> rat_t(const T a, const T b) { init(); fmpq_set_si(&_data, a, b); }
+		template <signed_builtin_integral T, unsigned_builtin_integral U> rat_t(const T a, const U b) { init(); fmpq_set_si(&_data, a, b); }
 		template <signed_builtin_integral T> rat_t(const T a) { init(); fmpq_set_si(&_data, a, 1); }
 		template <unsigned_builtin_integral T> rat_t(const T a, const T b) { init(); fmpq_set_ui(&_data, a, b); }
 		template <unsigned_builtin_integral T> rat_t(const T a) { init(); fmpq_set_ui(&_data, a, 1); }
