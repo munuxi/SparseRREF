@@ -191,6 +191,7 @@ namespace SparseRREF {
 
 	// The thresholds at which work is handed to the pool, and the size of the counting tables. All of
 	// them are empirical: picked where the shared (or counted) form starts to pay for itself.
+	inline constexpr size_t bignum_inline_work = 1u << 8;          // direct rational back-substitution
 	inline constexpr size_t sort_parallel_threshold = 1u << 14;    // parallel_sort(), the measured crossover
 	inline constexpr size_t product_parallel_threshold = 1u << 17; // tensor_product()
 	inline constexpr size_t pack_parallel_threshold = 1u << 17;    // tensor_contract()
