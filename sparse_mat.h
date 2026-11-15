@@ -523,17 +523,32 @@ namespace SparseRREF {
 				}
 			};
 
-			if (thecol.size() < 20 * nthreads) {
-				// narrow columns are the common case, and dispatching a handful of
-				// updates through the pool costs far more in wake-ups and
-				// synchronization than the elimination itself (a 3 element batch was
-				// measured at ~16us of pool overhead against ~0.5us of work)
+			// Keep the word-size-field crossover. For multiprecision values, estimate
+			// work using both the column length and pivot-row length. Updates read the
+			// same pivot row and write distinct rows, so they can run independently.
+			bool run_inline;
+			size_t nblocks;
+			if constexpr (std::is_arithmetic_v<T>) {
+				run_inline = thecol.size() < 20 * nthreads;
+				nblocks = thecol.size() / 10;
+			}
+			else {
+				run_inline = nthreads == 1 || thecol.size() < 2
+					// ceil(cutoff / column_length) avoids overflowing the work product.
+					|| mat[row].nnz() < bignum_inline_work / thecol.size()
+						+ (bignum_inline_work % thecol.size() != 0);
+				const size_t n = thecol.size();
+				// At least 64 blocks per worker when possible, then roughly ten rows
+				// per block for tall columns. This form cannot overflow 64 * nthreads.
+				const size_t balanced = nthreads > n / 64 ? n : size_t(64) * nthreads;
+				nblocks = std::min(n, std::max(n / 10, balanced));
+			}
+			if (run_inline) {
 				for (size_t j = 0; j < thecol.size(); j++)
 					eliminate(j);
 			}
 			else {
-				pool.detach_loop<index_t>(0, thecol.size(), eliminate,
-					thecol.size() / 10);
+				pool.detach_loop<index_t>(0, thecol.size(), eliminate, nblocks);
 			}
 			pool.wait();
 
