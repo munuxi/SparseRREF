@@ -748,12 +748,24 @@ namespace SparseRREF {
 		const field_t& F, thread_pool* pool = nullptr) {
 
 		sparse_mat<T, index_t> A(B.nrow, C.ncol);
-		// The pool costs a task and a scratch per thread, and the scratch is sized by ncol, so
-		// short rows are better done serially; the crossover is roughly a fixed number of
-		// products per thread.
+		// Rational arithmetic pays for the pool at less work, but constructing every
+		// worker's dense scratch must also be justified by the estimated product count.
 		const size_t products = B.nnz() * (C.nrow ? C.nnz() / C.nrow : 0);
-		if (pool != nullptr && products < mul_parallel_threshold * pool->get_thread_count())
-			pool = nullptr;
+		if (pool != nullptr) {
+			if constexpr (std::is_arithmetic_v<T>) {
+				if (products < mul_parallel_threshold * pool->get_thread_count())
+					pool = nullptr;
+			}
+			else {
+				const size_t workers = pool->get_thread_count();
+				const size_t scratch_work = A.ncol / mul_bignum_scratch_ratio
+					+ (A.ncol % mul_bignum_scratch_ratio != 0);
+				const size_t per_thread = std::max(mul_parallel_threshold_bignum, scratch_work);
+				// Division avoids overflow in per_thread * workers. One row cannot be shared.
+				if (B.nrow < 2 || workers < 2 || products / workers < per_thread)
+					pool = nullptr;
+			}
+		}
 
 		auto nthreads = 1;
 		if (pool)
@@ -821,9 +833,16 @@ namespace SparseRREF {
 			};
 
 		if (pool) {
+			// Keep fine balance on small products without enqueuing one task per row
+			// on huge matrices. Each task still writes only independent output rows.
+			size_t nblocks = (B.nrow < 20 * nthreads) ? 0 : B.nrow / 10;
+			if constexpr (!std::is_arithmetic_v<T>) {
+				const size_t balanced = size_t(nthreads) > B.nrow / 64 ? B.nrow : size_t(64) * nthreads;
+				nblocks = std::min<size_t>(B.nrow, std::max<size_t>(B.nrow / 10, balanced));
+			}
 			pool->detach_loop(0, B.nrow, [&](size_t i) {
 				method(SparseRREF::thread_id(), i);
-				}, ((B.nrow < 20 * nthreads) ? 0 : B.nrow / 10));
+				}, nblocks);
 			pool->wait();
 		}
 		else {
