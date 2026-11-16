@@ -22,7 +22,7 @@ namespace SparseRREF {
 	// because the matrix reader comes first in this file.
 	template <typename T, typename index_t>
 	sparse_tensor<T, index_t, SPARSE_CSR> sparse_tensor_read_wxf(const std::vector<WXF_PARSER::Token>& tokens,
-		const field_t& F, thread_pool* pool = nullptr, bool sort_ind = true);
+		const field_t& F, parallel_option opt = {}, bool sort_ind = true);
 
 	// Files larger than this are mapped instead of being copied into memory.
 	inline constexpr uintmax_t wxf_mmap_threshold = 1ULL << 30;
@@ -287,7 +287,7 @@ namespace SparseRREF {
 
 	// SparseArray[Automatic,dims,imp_val = 0,{1,{rowptr,colindex},vals}]
 	template <typename T, typename index_t>
-	sparse_tensor<T, index_t, SPARSE_CSR> sparse_tensor_read_wxf(const std::vector<WXF_PARSER::Token>& tokens, const field_t& F, thread_pool* pool, bool sort_ind) {
+	sparse_tensor<T, index_t, SPARSE_CSR> sparse_tensor_read_wxf(const std::vector<WXF_PARSER::Token>& tokens, const field_t& F, parallel_option opt, bool sort_ind) {
 		using st = sparse_tensor<T, index_t, SPARSE_CSR>;
 
 		if (tokens.size() < 13) {
@@ -611,13 +611,13 @@ namespace SparseRREF {
 		}
 		
 		if (sort_ind && !tensor.check_sorted())
-			tensor.sort_indices(pool);
+			tensor.sort_indices(opt);
 
 		return tensor;
 	}
 
 	template <typename T, typename index_t>
-	auto sparse_tensor_read_wxf(const std::filesystem::path file, const field_t& F, thread_pool* pool = nullptr, bool sort_ind = true) {
+	auto sparse_tensor_read_wxf(const std::filesystem::path file, const field_t& F, parallel_option opt = {}, bool sort_ind = true) {
 		if (!std::filesystem::exists(file)) {
 			std::cerr << file << " does not exist." << std::endl;
 			return sparse_tensor<T, index_t, SPARSE_CSR>();
@@ -632,7 +632,7 @@ namespace SparseRREF {
 			return sparse_tensor<T, index_t, SPARSE_CSR>();
 		}
 
-		return sparse_tensor_read_wxf<T, index_t>(wxf_parser.tokens, F, pool, sort_ind);
+		return sparse_tensor_read_wxf<T, index_t>(wxf_parser.tokens, F, opt, sort_ind);
 	}
 
 	// SparseArray[Automatic,dims,imp_val = 0,{1,{rowptr,colindex},vals}]

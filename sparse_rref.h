@@ -191,26 +191,64 @@ namespace SparseRREF {
 
 	// The thresholds at which work is handed to the pool, and the size of the counting tables. All of
 	// them are empirical: picked where the shared (or counted) form starts to pay for itself.
-	inline constexpr size_t bignum_inline_work = 1u << 8;          // direct rational back-substitution
-	inline constexpr size_t sort_parallel_threshold = 1u << 14;    // parallel_sort(), the measured crossover
-	inline constexpr size_t product_parallel_threshold = 1u << 17; // tensor_product()
-	inline constexpr size_t pack_parallel_threshold = 1u << 17;    // tensor_contract()
-	inline constexpr size_t scan_parallel_threshold = 1u << 17;    // tensor_contract(), two indices
-	inline constexpr size_t join_parallel_threshold = 1u << 15;    // einstein_sum()
-	inline constexpr size_t mul_parallel_threshold = 1u << 14;     // sparse_mat_mul(), products per thread
-	inline constexpr size_t mul_parallel_threshold_bignum = 1u << 8; // rational products per thread
-	inline constexpr size_t mul_bignum_scratch_ratio = 16; // dense scratch slots per estimated product
+	// inline constexpr size_t bignum_inline_work = 1u << 8;          // direct rational back-substitution
+	// inline constexpr size_t sort_parallel_threshold = 1u << 14;    // parallel_sort(), the measured crossover
+	// inline constexpr size_t product_parallel_threshold = 1u << 17; // tensor_product()
+	// inline constexpr size_t pack_parallel_threshold = 1u << 17;    // tensor_contract()
+	// inline constexpr size_t scan_parallel_threshold = 1u << 17;    // tensor_contract(), two indices
+	// inline constexpr size_t join_parallel_threshold = 1u << 15;    // einstein_sum()
+	// inline constexpr size_t mul_parallel_threshold = 1u << 14;     // sparse_mat_mul(), products per thread
+	// inline constexpr size_t mul_parallel_threshold_bignum = 1u << 8; // rational products per thread
+	// inline constexpr size_t mul_bignum_scratch_ratio = 16; // dense scratch slots per estimated product
 	inline constexpr size_t counting_max_buckets = 1u << 20;       // the counting passes (gen_perm())
+
+	enum class matmul_schedule {
+		PRODUCTS_PER_WORKER,        // products per thread, fixed cutoff
+		WIDTH_SCALED_PRODUCT_CUTOFF // rational products per thread, cutoff raised for wide results
+	};
+	enum class backsub_schedule {
+		TARGET_ROWS_PER_WORKER, // 20 target rows per thread
+		WORK_PER_PIVOT_COLUMN   // direct rational back-substitution, target rows times pivot-row nnz
+	};
+
+	/**
+	 * @brief Enables callers to choose parallel schedules and thresholds for their workloads.
+	 */
+	struct parallel_policy {
+		matmul_schedule matmul = matmul_schedule::PRODUCTS_PER_WORKER;
+		backsub_schedule backsub = backsub_schedule::TARGET_ROWS_PER_WORKER;
+
+		// These defaults are empirical: picked where handing work to the pool starts to pay for itself.
+		size_t mul_parallel_threshold = 1u << 14;        // sparse_mat_mul(), products per thread
+		size_t mul_parallel_threshold_bignum = 1u << 8;  // rational products per thread
+		size_t mul_bignum_scratch_ratio = 16;            // dense scratch slots per estimated product
+		size_t bignum_inline_work = 1u << 8;             // direct rational back-substitution
+		size_t sort_parallel_threshold = 1u << 14;       // parallel_sort(), the measured crossover
+		size_t product_parallel_threshold = 1u << 17;    // tensor_product()
+		size_t pack_parallel_threshold = 1u << 17;       // tensor_contract()
+		size_t scan_parallel_threshold = 1u << 17;       // tensor_contract(), two indices
+		size_t join_parallel_threshold = 1u << 15;       // einstein_sum()
+	};
+
+	struct parallel_option {
+		thread_pool* pool; // non-owning
+		parallel_policy scheduling;
+
+		// Implicit so callers may still pass a pool pointer
+		constexpr parallel_option(thread_pool* p = nullptr, parallel_policy s = {}) noexcept : pool(p), scheduling(s) {}
+	};
 
 	// A range sort that runs on our own pool: the caller's pool sizes the parallelism, so --threads
 	// governs it. It sort each block of the range in parallel, and then merges the sorted blocks.
 	template <typename RandomIt, typename Cmp>
-	void parallel_sort(RandomIt first, RandomIt last, Cmp&& cmp, thread_pool* pool, const size_t threshold = sort_parallel_threshold) {
+	void parallel_sort(RandomIt first, RandomIt last, Cmp&& cmp, parallel_option opt = {}) {
+		thread_pool* pool = opt.pool;
+		const size_t threshold = opt.scheduling.sort_parallel_threshold;
 		const size_t n = static_cast<size_t>(last - first);
 		if (pool == nullptr || n < threshold || BS::this_thread::get_index().has_value())
 			return std::sort(first, last, cmp);
 
-		const size_t nblocks = std::min(pool->get_thread_count(), n / threshold);
+		const size_t nblocks = std::min(pool->get_thread_count(), threshold == 0 ? n : n / threshold);
 		if (nblocks < 2)
 			return std::sort(first, last, cmp);
 
@@ -239,6 +277,11 @@ namespace SparseRREF {
 		}
 	}
 
+	template <typename RandomIt, typename Cmp>
+	void parallel_sort(RandomIt first, RandomIt last, Cmp&& cmp, thread_pool* pool, const size_t threshold) {
+		parallel_sort(first, last, std::forward<Cmp>(cmp), parallel_option{pool, {.sort_parallel_threshold = threshold}});
+	}
+
 	// rref_option
 	// method 0: right and left search
 	// method 1: only right search (with the default col_weight its pivot columns are the
@@ -257,6 +300,9 @@ namespace SparseRREF {
 		int print_step = 100;
 		std::function<int64_t(int64_t)> col_weight = [](int64_t i) { return i; };
 		thread_pool pool = thread_pool(1); // default: thread pool with 1 thread
+		parallel_policy scheduling{};
+
+		parallel_option to_parallel_option() & noexcept { return { &pool, scheduling }; }
 	};
 	using rref_option_t = rref_option[1];
 

@@ -105,12 +105,13 @@ static void check_case(int rows, int inner, int cols, bool large, bool skewed, s
     pool.set_cleanup_func([] { flint_cleanup(); });
     for (int repeat = 0; repeat < 3; ++repeat) {
         Matrix<T> actual;
+        const parallel_option opt{repeat == 0 ? nullptr : &pool, {.matmul = matmul_schedule::WIDTH_SCALED_PRODUCT_CUTOFF}};
 #ifdef SPARSERREF_TEST_EXPECT_POOL
         if (observe_parallel && repeat != 0 && threads > 1)
-            observe_pool_path(pool, true, [&] { actual = sparse_mat_mul(a, b, field, &pool); });
+            observe_pool_path(pool, true, [&] { actual = sparse_mat_mul(a, b, field, opt); });
         else
 #endif
-            actual = sparse_mat_mul(a, b, field, repeat == 0 ? nullptr : &pool);
+            actual = sparse_mat_mul(a, b, field, opt);
         require(actual.nrow == a.nrow && actual.ncol == b.ncol, "wrong product shape");
         for (size_t i = 0; i < actual.nrow; ++i) {
             size_t nonzeros = 0;
@@ -138,12 +139,13 @@ static void wide_sparse_case(size_t threads) {
     thread_pool pool(threads);
     pool.set_cleanup_func([] { flint_cleanup(); });
     Matrix<rat_t> actual;
+    const parallel_option opt{&pool, {.matmul = matmul_schedule::WIDTH_SCALED_PRODUCT_CUTOFF}};
 #ifdef SPARSERREF_TEST_EXPECT_POOL
     if (threads > 1)
-        observe_pool_path(pool, false, [&] { actual = sparse_mat_mul(a, wide, field, &pool); });
+        observe_pool_path(pool, false, [&] { actual = sparse_mat_mul(a, wide, field, opt); });
     else
 #endif
-        actual = sparse_mat_mul(a, wide, field, &pool);
+        actual = sparse_mat_mul(a, wide, field, opt);
     require(actual.nrow == a.nrow && actual.ncol == columns, "wrong wide product shape");
     for (size_t i = 0; i < actual.nrow; ++i) {
         size_t nonzeros = 0;

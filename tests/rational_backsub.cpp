@@ -78,6 +78,7 @@ static void large_border_case(int ordering, size_t threads) {
     }
     rref_option_t options;
     options->pool.reset(threads);
+    options->scheduling.backsub = backsub_schedule::WORK_PER_PIVOT_COLUMN;
     options->pool.set_cleanup_func([] { flint_cleanup(); });
     for (int repeat = 0; repeat < 3; ++repeat) {
         auto actual = original;
@@ -139,6 +140,7 @@ static void check_case(int rank, int ordering, bool large, size_t threads) {
     }
     rref_option_t options;
     options->pool.reset(threads);
+    options->scheduling.backsub = backsub_schedule::WORK_PER_PIVOT_COLUMN;
     options->pool.set_cleanup_func([] { flint_cleanup(); });
     for (int repeat = 0; repeat < 3; ++repeat) {
         auto actual = original;
