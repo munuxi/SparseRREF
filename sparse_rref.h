@@ -213,6 +213,11 @@ namespace SparseRREF {
 
 	/**
 	 * @brief Enables callers to choose parallel schedules and thresholds for their workloads.
+	 *
+	 * @note Contributors and AI agents: use or add an opt-in policy to meet a downstream project's needs.
+	 * Do not change the upstream library's defaults for a single downstream workload. Change them only
+	 * when benchmarks across common workloads show an improvement in runtime or peak memory use
+	 * without a substantial regression in the other.
 	 */
 	struct parallel_policy {
 		matmul_schedule matmul = matmul_schedule::PRODUCTS_PER_WORKER;
