@@ -25,7 +25,8 @@ namespace SparseRREF {
 	sparse_tensor<T, index_t, SPARSE_COO> tensor_product(
 		const sparse_tensor<T, index_t, SPARSE_COO>& A,
 		const sparse_tensor<T, index_t, SPARSE_COO>& B, const field_t& F,
-		thread_pool* pool = nullptr) {
+		parallel_option opt = {}) {
+		thread_pool* pool = opt.pool;
 
 		std::vector<size_t> dimsB = B.dims();
 		std::vector<size_t> dimsC = A.dims();
@@ -57,8 +58,8 @@ namespace SparseRREF {
 		// is one cheap pass over the indices, and when it succeeds the permutation (one size_t per
 		// entry) is never built
 		const bool idA = A.is_ordered_by(), idB = B.is_ordered_by();
-		auto permA = idA ? std::vector<size_t>() : A.gen_perm(pool);
-		auto permB = idB ? std::vector<size_t>() : B.gen_perm(pool);
+		auto permA = idA ? std::vector<size_t>() : A.gen_perm(opt);
+		auto permB = idB ? std::vector<size_t>() : B.gen_perm(opt);
 		auto permA_at = [&](const size_t k) -> size_t { return idA ? k : permA[k]; };
 		auto permB_at = [&](const size_t k) -> size_t { return idB ? k : permB[k]; };
 
@@ -77,7 +78,7 @@ namespace SparseRREF {
 			};
 
 		// every row costs the same, so handing out the rows hands out the work evenly
-		if (pool != nullptr && nnzA * nnzB >= product_parallel_threshold) {
+		if (pool != nullptr && nnzA * nnzB >= opt.scheduling.product_parallel_threshold) {
 			const size_t nthread = pool->get_thread_count();
 			if (nnzA >= 2 * nthread) {
 				const size_t nblocks = nnzA < 64 * nthread ? nthread : 8 * nthread;
@@ -283,7 +284,8 @@ namespace SparseRREF {
 		const sparse_tensor<T, index_t, SPARSE_COO>& A,
 		const sparse_tensor<T, index_t, SPARSE_COO>& B,
 		const std::vector<size_t>& i1, const std::vector<size_t>& i2,
-		const field_t& F, thread_pool* pool = nullptr) {
+		const field_t& F, parallel_option opt = {}) {
+		thread_pool* pool = opt.pool;
 
 		using index_v = std::vector<index_t>;
 		using index_p = index_t*;
@@ -294,7 +296,7 @@ namespace SparseRREF {
 		}
 
 		if (i1.size() == 0) {
-			return tensor_product(A, B, F, pool);
+			return tensor_product(A, B, F, opt);
 		}
 
 		// the indices of a contract set have to be in range and pairwise distinct: a repeated index
@@ -346,8 +348,8 @@ namespace SparseRREF {
 		// callers hand in: the check is one cheap pass, and when it succeeds the permutation -- one
 		// size_t per entry -- is never built
 		const bool idA = A.is_ordered_by(&index_perm_A), idB = B.is_ordered_by(&index_perm_B);
-		auto permA = idA ? std::vector<size_t>() : A.gen_perm(index_perm_A, pool);
-		auto permB = idB ? std::vector<size_t>() : B.gen_perm(index_perm_B, pool);
+		auto permA = idA ? std::vector<size_t>() : A.gen_perm(index_perm_A, opt);
+		auto permB = idB ? std::vector<size_t>() : B.gen_perm(index_perm_B, opt);
 		auto permA_at = [&](const size_t k) -> size_t { return idA ? k : permA[k]; };
 		auto permB_at = [&](const size_t k) -> size_t { return idB ? k : permB[k]; };
 
@@ -488,7 +490,7 @@ namespace SparseRREF {
 			};
 
 		const size_t nthread = pool == nullptr ? 1 : pool->get_thread_count();
-		if (pool != nullptr && B.nnz() >= pack_parallel_threshold) {
+		if (pool != nullptr && B.nnz() >= opt.scheduling.pack_parallel_threshold) {
 			pool->detach_loop(0, B.nnz(), pack_B, 4 * nthread);
 			pool->wait();
 		}
@@ -537,7 +539,7 @@ namespace SparseRREF {
 		std::vector<T> val_B;
 		if (!idB) {
 			val_B.resize(B.nnz());
-			if (pool != nullptr && B.nnz() >= pack_parallel_threshold) {
+			if (pool != nullptr && B.nnz() >= opt.scheduling.pack_parallel_threshold) {
 				pool->detach_loop(0, B.nnz(), [&](const size_t k) { val_B[k] = B.val(permB_at(k)); }, 4 * nthread);
 				pool->wait();
 			}
@@ -1016,9 +1018,9 @@ namespace SparseRREF {
 	sparse_tensor<T, index_t, SPARSE_COO> tensor_contract(
 		const sparse_tensor<T, index_t, SPARSE_COO>& A,
 		const sparse_tensor<T, index_t, SPARSE_COO>& B,
-		const size_t i, const size_t j, const field_t& F, thread_pool* pool = nullptr) {
+		const size_t i, const size_t j, const field_t& F, parallel_option opt = {}) {
 
-		return tensor_contract(A, B, std::vector<size_t>{ i }, std::vector<size_t>{ j }, F, pool);
+		return tensor_contract(A, B, std::vector<size_t>{ i }, std::vector<size_t>{ j }, F, opt);
 	}
 
 	// contract the a-th index of A with the 0-th index of B, then move the remaining indices of B into
@@ -1029,7 +1031,7 @@ namespace SparseRREF {
 	sparse_tensor<T, index_t, SPARSE_COO> tensor_contract_2(
 		const sparse_tensor<T, index_t, SPARSE_COO>& A,
 		const sparse_tensor<T, index_t, SPARSE_COO>& B,
-		const size_t a, const field_t& F, thread_pool* pool = nullptr, const bool sort_ind = true) {
+		const size_t a, const field_t& F, parallel_option opt = {}, const bool sort_ind = true) {
 
 		const size_t rankA = A.rank();
 		const size_t rankB = B.rank();
@@ -1042,7 +1044,7 @@ namespace SparseRREF {
 
 		// tensor_contract returns the order [A except a] ++ [B except 0], so perm[i] is the old slot of
 		// the new slot i, and the rank of the result fixes the size of perm
-		auto C = tensor_contract(A, B, a, 0, F, pool);
+		auto C = tensor_contract(A, B, a, 0, F, opt);
 
 		std::vector<size_t> perm;
 		perm.reserve(rankA + rankB - 2);
@@ -1055,7 +1057,7 @@ namespace SparseRREF {
 		for (size_t k = rankA; k + 1 < rankA + rankB - 1; k++)
 			perm.push_back(k);
 
-		C.transpose_replace(perm, pool, sort_ind);
+		C.transpose_replace(perm, opt, sort_ind);
 
 		return C;
 	}
@@ -1064,7 +1066,8 @@ namespace SparseRREF {
 	template <typename index_t, typename T>
 	sparse_tensor<T, index_t, SPARSE_COO> tensor_contract(
 		const sparse_tensor<T, index_t, SPARSE_COO>& A,
-		const size_t i, const size_t j, const field_t& F, thread_pool* pool = nullptr) {
+		const size_t i, const size_t j, const field_t& F, parallel_option opt = {}) {
+		thread_pool* pool = opt.pool;
 
 		using index_v = std::vector<index_t>;
 		using index_p = index_t*;
@@ -1081,7 +1084,7 @@ namespace SparseRREF {
 		}
 
 		if (i > j)
-			return tensor_contract(A, j, i, F, pool);
+			return tensor_contract(A, j, i, F, opt);
 
 		// then i < j
 
@@ -1097,7 +1100,7 @@ namespace SparseRREF {
 		std::vector<size_t> equal_ind_list;
 
 		// search for the same indices
-		if (pool != nullptr && A.nnz() >= scan_parallel_threshold) {
+		if (pool != nullptr && A.nnz() >= opt.scheduling.scan_parallel_threshold) {
 			// the scan is a plain pass over the tensor and is what the serial version spends most of
 			// its time on, so above the threshold it is worth handing its blocks to the pool
 			const size_t nthread = pool->get_thread_count();
@@ -1145,7 +1148,7 @@ namespace SparseRREF {
 		auto by_index = [&](size_t a, size_t b) {
 			return lexico_compare(A.index(equal_ind_list[a]), A.index(equal_ind_list[b]), index_perm) < 0;
 			};
-		parallel_sort(perm.begin(), perm.end(), by_index, pool);
+		parallel_sort(perm.begin(), perm.end(), by_index, opt);
 
 		std::vector<size_t> rowptr;
 		rowptr.push_back(0);
@@ -1167,7 +1170,7 @@ namespace SparseRREF {
 
 		// the merge cost scales with the number of matched entries, so a small match set stays on one
 		// thread even when a pool is available, since the dispatch overhead would dominate
-		if (pool != nullptr && equal_ind_list.size() >= scan_parallel_threshold
+		if (pool != nullptr && equal_ind_list.size() >= opt.scheduling.scan_parallel_threshold
 			&& rowptr.size() - 1 >= 2 * pool->get_thread_count()) {
 			const size_t nrows = rowptr.size() - 1;
 			const size_t nthread = pool->get_thread_count();
@@ -1271,7 +1274,7 @@ namespace SparseRREF {
 	sparse_tensor<T, index_t, SPARSE_COO> tensor_dot(
 		const sparse_tensor<T, index_t, SPARSE_COO>& A,
 		const sparse_tensor<T, index_t, SPARSE_COO>& B,
-		const field_t& F, thread_pool* pool = nullptr) {
+		const field_t& F, parallel_option opt = {}) {
 
 		// otherwise A.rank() - 1 wraps around
 		if (A.rank() == 0 || B.rank() == 0) {
@@ -1279,7 +1282,7 @@ namespace SparseRREF {
 			return sparse_tensor<T, index_t, SPARSE_COO>();
 		}
 
-		return tensor_contract(A, B, A.rank() - 1, 0, F, pool);
+		return tensor_contract(A, B, A.rank() - 1, 0, F, opt);
 	}
 
 	// usually B is a matrix, and A is a tensor, we want to contract all the dimensions of A with B
@@ -1289,7 +1292,7 @@ namespace SparseRREF {
 	sparse_tensor<T, index_t, SPARSE_COO> tensor_transform(
 		const sparse_tensor<T, index_t, SPARSE_COO>& A,
 		const sparse_tensor<T, index_t, SPARSE_COO>& B,
-		const size_t start_index, const field_t& F, thread_pool* pool = nullptr) {
+		const size_t start_index, const field_t& F, parallel_option opt = {}) {
 
 		auto rank = A.rank();
 		if (start_index >= rank) {
@@ -1300,9 +1303,9 @@ namespace SparseRREF {
 
 		// A keeps its relative index order (B's remaining indices are appended at the end), so the next
 		// index to contract with B is again at start_index: i only counts the contractions
-		auto C = tensor_contract(A, B, start_index, 0, F, pool);
+		auto C = tensor_contract(A, B, start_index, 0, F, opt);
 		for (size_t i = start_index + 1; i < rank; i++) {
-			C = tensor_contract(C, B, start_index, 0, F, pool);
+			C = tensor_contract(C, B, start_index, 0, F, opt);
 		}
 
 		return C;
@@ -1312,7 +1315,7 @@ namespace SparseRREF {
 	void tensor_transform_replace(
 		sparse_tensor<T, index_t, SPARSE_COO>& A,
 		const sparse_tensor<T, index_t, SPARSE_COO>& B,
-		const size_t start_index, const field_t& F, thread_pool* pool = nullptr) {
+		const size_t start_index, const field_t& F, parallel_option opt = {}) {
 
 		auto rank = A.rank();
 		if (start_index >= rank) {
@@ -1323,7 +1326,7 @@ namespace SparseRREF {
 
 		// start_index does not move either, see tensor_transform
 		for (size_t i = start_index; i < rank; i++) {
-			A = tensor_contract(A, B, start_index, 0, F, pool);
+			A = tensor_contract(A, B, start_index, 0, F, opt);
 		}
 	}
 
@@ -1437,7 +1440,8 @@ namespace SparseRREF {
 	sparse_tensor<T, index_t, SPARSE_COO> einstein_sum(
 		const std::vector<sparse_tensor<T, index_t, SPARSE_COO>*> tensors,
 		const std::vector<std::vector<size_t>> index_sets,
-		const field_t& F, thread_pool* pool = nullptr) {
+		const field_t& F, parallel_option opt = {}) {
+		thread_pool* pool = opt.pool;
 
 		using accumulator_t = einstein_accumulator<T>;
 
@@ -1642,7 +1646,7 @@ namespace SparseRREF {
 				}
 				};
 
-			if (pool != nullptr && nnz >= join_parallel_threshold) {
+			if (pool != nullptr && nnz >= opt.scheduling.join_parallel_threshold) {
 				auto fill = [&](const size_t ss, const size_t ee) {
 					const size_t id = thread_id();
 					for (size_t e = ss; e < ee; e++)
@@ -1725,7 +1729,7 @@ namespace SparseRREF {
 	// IO
 
 	template <typename T, typename index_t, typename S>
-	sparse_tensor<T, index_t, SPARSE_COO> sparse_tensor_read(S& st, const field_t& F, thread_pool* pool = nullptr, const bool sort_ind = true) {
+	sparse_tensor<T, index_t, SPARSE_COO> sparse_tensor_read(S& st, const field_t& F, parallel_option opt = {}, const bool sort_ind = true) {
 		if (!st.is_open())
 			return sparse_tensor<T, index_t, SPARSE_COO>();
 
@@ -1835,7 +1839,7 @@ namespace SparseRREF {
 		}
 		
 		if (sort_ind && !tensor.check_sorted())
-			tensor.sort_indices(pool);
+			tensor.sort_indices(opt);
 
 		return tensor;
 	}

@@ -528,15 +528,15 @@ namespace SparseRREF {
 			// same pivot row and write distinct rows, so they can run independently.
 			bool run_inline;
 			size_t nblocks;
-			if constexpr (std::is_arithmetic_v<T>) {
+			if (!std::is_same_v<T, rat_t> || opt->scheduling.backsub == backsub_schedule::TARGET_ROWS_PER_WORKER) {
 				run_inline = thecol.size() < 20 * nthreads;
 				nblocks = thecol.size() / 10;
 			}
 			else {
 				run_inline = nthreads == 1 || thecol.size() < 2
 					// ceil(cutoff / column_length) avoids overflowing the work product.
-					|| mat[row].nnz() < bignum_inline_work / thecol.size()
-						+ (bignum_inline_work % thecol.size() != 0);
+					|| mat[row].nnz() < opt->scheduling.bignum_inline_work / thecol.size()
+						+ (opt->scheduling.bignum_inline_work % thecol.size() != 0);
 				const size_t n = thecol.size();
 				// At least 64 blocks per worker when possible, then roughly ten rows
 				// per block for tall columns. This form cannot overflow 64 * nthreads.
@@ -760,31 +760,36 @@ namespace SparseRREF {
 	template <typename T, typename index_t>
 	sparse_mat<T, index_t> sparse_mat_mul(
 		const sparse_mat<T, index_t>& B, const sparse_mat<T, index_t>& C,
-		const field_t& F, thread_pool* pool = nullptr) {
+		const field_t& F, parallel_option opt = {}) {
 
 		sparse_mat<T, index_t> A(B.nrow, C.ncol);
 		// Rational arithmetic pays for the pool at less work, but constructing every
 		// worker's dense scratch must also be justified by the estimated product count.
-		const size_t products = B.nnz() * (C.nrow ? C.nnz() / C.nrow : 0);
+		thread_pool* pool = opt.pool;
+		size_t nthreads = 1;
+		const bool use_width_scaled_schedule = std::is_same_v<T, rat_t>
+			&& opt.scheduling.matmul == matmul_schedule::WIDTH_SCALED_PRODUCT_CUTOFF;
 		if (pool != nullptr) {
-			if constexpr (std::is_arithmetic_v<T>) {
-				if (products < mul_parallel_threshold * pool->get_thread_count())
+			nthreads = pool->get_thread_count();
+			const size_t products = B.nnz() * (C.nrow ? C.nnz() / C.nrow : 0);
+			if (use_width_scaled_schedule) {
+				const size_t ratio = opt.scheduling.mul_bignum_scratch_ratio;
+				if (ratio == 0)
 					pool = nullptr;
+				else {
+					const size_t scratch_work = A.ncol / ratio + (A.ncol % ratio != 0);
+					const size_t per_thread = std::max(opt.scheduling.mul_parallel_threshold_bignum, scratch_work);
+					// Division avoids overflow in per_thread * nthreads. One row cannot be shared.
+					if (B.nrow < 2 || nthreads < 2 || products / nthreads < per_thread)
+						pool = nullptr;
+				}
 			}
-			else {
-				const size_t workers = pool->get_thread_count();
-				const size_t scratch_work = A.ncol / mul_bignum_scratch_ratio
-					+ (A.ncol % mul_bignum_scratch_ratio != 0);
-				const size_t per_thread = std::max(mul_parallel_threshold_bignum, scratch_work);
-				// Division avoids overflow in per_thread * workers. One row cannot be shared.
-				if (B.nrow < 2 || workers < 2 || products / workers < per_thread)
-					pool = nullptr;
-			}
+			else if (products / nthreads < opt.scheduling.mul_parallel_threshold)
+				pool = nullptr;
 		}
 
-		auto nthreads = 1;
-		if (pool)
-			nthreads = pool->get_thread_count();
+		if (pool == nullptr)
+			nthreads = 1;
 
 		dense_cache_t<T> cache_densed_mat(A.ncol * nthreads);
 		std::vector<nonzero_cols> nonzero_c(nthreads, nonzero_cols(A.ncol));
@@ -851,7 +856,7 @@ namespace SparseRREF {
 			// Keep fine balance on small products without enqueuing one task per row
 			// on huge matrices. Each task still writes only independent output rows.
 			size_t nblocks = (B.nrow < 20 * nthreads) ? 0 : B.nrow / 10;
-			if constexpr (!std::is_arithmetic_v<T>) {
+			if (use_width_scaled_schedule) {
 				const size_t balanced = size_t(nthreads) > B.nrow / 64 ? B.nrow : size_t(64) * nthreads;
 				nblocks = std::min<size_t>(B.nrow, std::max<size_t>(B.nrow / 10, balanced));
 			}
@@ -2094,6 +2099,66 @@ namespace SparseRREF {
 		for (auto& p : pivots)
 			n_pivots.insert(n_pivots.end(), p.begin(), p.end());
 		return sparse_mat_rref_kernel(M, n_pivots, F, opt);
+	}
+
+	// Move the RREF rows into the kernel and leave M empty.
+	template <typename T, typename index_t>
+	sparse_mat<T, index_t> sparse_mat_rref_kernel(sparse_mat<T, index_t>&& M,
+		const std::vector<pivot_t<index_t>>& pivots, const field_t& F, rref_option_t opt) {
+
+		auto rank = pivots.size();
+
+		if (rank == M.ncol) {
+			M.clear();
+			return sparse_mat<T, index_t>();
+		}
+
+		// just a warning, the kernel is not correct if the backward substitution was skipped
+		if (!opt->is_back_sub) {
+			std::cerr << "Warning: sparse_mat_rref_kernel: the backward substitution was skipped, so "
+				<< "the pivot submatrix is only upper triangular and the result is not a kernel of "
+				<< "the input" << std::endl;
+		}
+
+		constexpr index_t sv = index_sval<index_t>();
+		T m1 = scalar_neg((T)1, F);
+
+		sparse_mat<T, index_t> K(M.ncol, M.ncol - rank);
+
+		auto nonpivs = perm_init((index_t)M.ncol);
+
+		for (auto [r, c] : pivots) {
+			K[c] = std::move(M[r]);
+			*K[c].find(c) = (T)0;
+			K[c].canonicalize();
+			nonpivs[c] = sv;
+		}
+		std::erase_if(nonpivs, [](index_t i) { return i == sv; });
+		std::vector<index_t> nonpivs_ord(M.ncol, sv);
+		M.clear();
+		for (size_t i = 0; i < nonpivs.size(); i++)
+			nonpivs_ord[nonpivs[i]] = (index_t)i;
+
+		for (size_t i = 0; i < nonpivs.size(); i++) {
+			K[nonpivs[i]].push_back((index_t)i, m1);
+		}
+
+		for (auto [r, c] : pivots) {
+			for (size_t j = 0; j < K[c].nnz(); j++)
+				K[c](j) = nonpivs_ord[K[c](j)];
+		}
+
+		return K;
+	}
+
+	template <typename T, typename index_t>
+	sparse_mat<T, index_t> sparse_mat_rref_kernel(sparse_mat<T, index_t>&& M,
+		const std::vector<std::vector<pivot_t<index_t>>>& pivots,
+		const field_t& F, rref_option_t opt) {
+		std::vector<pivot_t<index_t>> n_pivots;
+		for (auto& p : pivots)
+			n_pivots.insert(n_pivots.end(), p.begin(), p.end());
+		return sparse_mat_rref_kernel(std::move(M), n_pivots, F, opt);
 	}
 
 	// error code:
