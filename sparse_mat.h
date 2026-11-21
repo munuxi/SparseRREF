@@ -2101,6 +2101,66 @@ namespace SparseRREF {
 		return sparse_mat_rref_kernel(M, n_pivots, F, opt);
 	}
 
+	// Move the RREF rows into the kernel and leave M empty.
+	template <typename T, typename index_t>
+	sparse_mat<T, index_t> sparse_mat_rref_kernel(sparse_mat<T, index_t>&& M,
+		const std::vector<pivot_t<index_t>>& pivots, const field_t& F, rref_option_t opt) {
+
+		auto rank = pivots.size();
+
+		if (rank == M.ncol) {
+			M.clear();
+			return sparse_mat<T, index_t>();
+		}
+
+		// just a warning, the kernel is not correct if the backward substitution was skipped
+		if (!opt->is_back_sub) {
+			std::cerr << "Warning: sparse_mat_rref_kernel: the backward substitution was skipped, so "
+				<< "the pivot submatrix is only upper triangular and the result is not a kernel of "
+				<< "the input" << std::endl;
+		}
+
+		constexpr index_t sv = index_sval<index_t>();
+		T m1 = scalar_neg((T)1, F);
+
+		sparse_mat<T, index_t> K(M.ncol, M.ncol - rank);
+
+		auto nonpivs = perm_init((index_t)M.ncol);
+
+		for (auto [r, c] : pivots) {
+			K[c] = std::move(M[r]);
+			*K[c].find(c) = (T)0;
+			K[c].canonicalize();
+			nonpivs[c] = sv;
+		}
+		std::erase_if(nonpivs, [](index_t i) { return i == sv; });
+		std::vector<index_t> nonpivs_ord(M.ncol, sv);
+		M.clear();
+		for (size_t i = 0; i < nonpivs.size(); i++)
+			nonpivs_ord[nonpivs[i]] = (index_t)i;
+
+		for (size_t i = 0; i < nonpivs.size(); i++) {
+			K[nonpivs[i]].push_back((index_t)i, m1);
+		}
+
+		for (auto [r, c] : pivots) {
+			for (size_t j = 0; j < K[c].nnz(); j++)
+				K[c](j) = nonpivs_ord[K[c](j)];
+		}
+
+		return K;
+	}
+
+	template <typename T, typename index_t>
+	sparse_mat<T, index_t> sparse_mat_rref_kernel(sparse_mat<T, index_t>&& M,
+		const std::vector<std::vector<pivot_t<index_t>>>& pivots,
+		const field_t& F, rref_option_t opt) {
+		std::vector<pivot_t<index_t>> n_pivots;
+		for (auto& p : pivots)
+			n_pivots.insert(n_pivots.end(), p.begin(), p.end());
+		return sparse_mat_rref_kernel(std::move(M), n_pivots, F, opt);
+	}
+
 	// error code:
 	// 0 - sucess
 	// 1 - matrix is not square
